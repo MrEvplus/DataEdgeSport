@@ -8,7 +8,12 @@ from datetime import date
 
 # Config & Data
 from config import LEAGUE_MAPPING
-from data.loader import load_data_from_supabase, load_data_from_file, filter_by_league
+from dataedgesport.data.loader import (
+    load_data_from_supabase,
+    load_data_from_file,
+    filter_by_league,
+)
+
 from data.preprocess import preprocess_dataframe
 
 # Moduli Analisi
