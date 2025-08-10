@@ -4,7 +4,8 @@ analysis/live_minute.py - Analisi live dal minuto selezionato
 
 import streamlit as st
 import pandas as pd
-from utils.label import label_match, extract_minutes
+from label import label_match, extract_minutes
+
 
 
 # -------------------------------------------------------

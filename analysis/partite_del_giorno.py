@@ -6,9 +6,10 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 
-from analysis.pre_match import run_pre_match
-from analysis.live_minute import run_live_minute_analysis
-from analysis.correct_score_ev import run_correct_score_ev
+from pre_match import run_pre_match
+from live_minute import run_live_minute_analysis
+from correct_score_ev import run_correct_score_ev
+
 
 
 # -------------------------------------------------------

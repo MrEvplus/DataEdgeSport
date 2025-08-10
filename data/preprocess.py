@@ -4,7 +4,8 @@ data/preprocess.py - Pulizia e preparazione del dataset per Trading Dashboard V2
 
 import pandas as pd
 import numpy as np
-from utils.label import label_match, extract_minutes
+from label import label_match, extract_minutes
+
 
 # -------------------------------------------------------
 # 🔹 Funzione di pre-elaborazione

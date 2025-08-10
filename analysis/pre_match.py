@@ -4,7 +4,8 @@ analysis/pre_match.py - Confronto pre-match tra due squadre
 
 import streamlit as st
 import pandas as pd
-from utils.label import label_match
+from label import label_match
+
 
 # -------------------------------------------------------
 # 🔹 Funzione principale

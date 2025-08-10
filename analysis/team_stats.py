@@ -4,7 +4,8 @@ analysis/team_stats.py - Statistiche per singola squadra
 
 import streamlit as st
 import pandas as pd
-from utils.label import label_match, extract_minutes
+from label import label_match, extract_minutes
+
 
 # -------------------------------------------------------
 # 🔹 Funzione principale

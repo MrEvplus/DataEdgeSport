@@ -5,7 +5,8 @@ analysis/reverse_engineering.py - Analisi storica e ricerca EV+ pattern
 import streamlit as st
 import pandas as pd
 import numpy as np
-from utils.label import label_match
+from label import label_match
+
 
 
 # -------------------------------------------------------

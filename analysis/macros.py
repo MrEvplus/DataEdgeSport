@@ -6,7 +6,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from utils.label import label_match, extract_minutes
+from label import label_match, extract_minutes
+
 
 # -------------------------------------------------------
 # 🔹 Calcolo distribuzione goal per intervalli di minuti

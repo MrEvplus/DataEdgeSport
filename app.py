@@ -1,23 +1,20 @@
 # app.py - Trading Dashboard V2.0
 
+# app.py - Trading Dashboard V2.0 (fix import)
+
+import os, sys
 import streamlit as st
 import pandas as pd
-from datetime import date
 
-# -----------------------------
-# Config & Data
-# -----------------------------
+# Assicura che Python veda la cartella del file come root import
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
+
 from config import LEAGUE_MAPPING
-from loader import (
-    load_data_from_supabase,
-    load_data_from_file,
-    filter_by_league,
-)
+from loader import load_data_from_supabase, load_data_from_file, filter_by_league
 from preprocess import preprocess_dataframe
 
-# -----------------------------
-# Moduli Analisi
-# -----------------------------
 from macros import run_macro_stats
 from team_stats import run_team_stats
 from pre_match import run_pre_match
