@@ -125,4 +125,4 @@ elif menu_option == "Analisi Live da Minuto":
 elif menu_option == "Partite del Giorno":
     run_partite_del_giorno(df, db_selected)
 elif menu_option == "🧠 Reverse Engineering EV+":
-    run_reverse_engineering(df)
+    run_reverse_engineering(df, db_selected)
