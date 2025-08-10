@@ -19,11 +19,7 @@ for p in (APP_DIR, PARENT_DIR):
 # Config & Data
 # -----------------------------
 from config import LEAGUE_MAPPING
-from loader import (
-    load_data_from_supabase,
-    load_data_from_file,
-    filter_by_league,
-)
+from dataedgesport.loader import load_data_from_supabase, load_data_from_file, filter_by_league
 from preprocess import preprocess_dataframe
 
 # -----------------------------
