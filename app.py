@@ -1,37 +1,50 @@
-# app.py — Trading Dashboard V2.0 (robust path & clean imports)
+# app.py — Trading Dashboard V2.0 (fix import path)
 
 import os, sys
 import streamlit as st
 import pandas as pd
 
-# ------------------------------------------------------------------
-# PATH FIX: consente import sia se i moduli sono nella stessa cartella
-# di app.py, sia se sono nella cartella "parent" (repo root).
-# Es: .../repo/dataedgesport/app.py  e .../repo/loader.py
-# ------------------------------------------------------------------
-APP_DIR = os.path.dirname(os.path.abspath(__file__))          # .../dataedgesport  (o repo root)
-PARENT_DIR = os.path.dirname(APP_DIR)                         # repo root (se app.py è in sottocartella)
+# ---- PATH FIX: aggiunge sia la cartella corrente sia la parent allo sys.path
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(APP_DIR)
 for p in (APP_DIR, PARENT_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)
 
 # -----------------------------
-# Config & Data
+# Config & Data (import robusti)
 # -----------------------------
+try:
+    # layout: repo_root/data/loader.py
+    from data.loader import load_data_from_supabase, load_data_from_file, filter_by_league
+    from data.preprocess import preprocess_dataframe
+except ModuleNotFoundError:
+    # layout: repo_root/loader.py
+    from loader import load_data_from_supabase, load_data_from_file, filter_by_league
+    from preprocess import preprocess_dataframe
+
 from config import LEAGUE_MAPPING
-from dataedgesport.loader import load_data_from_supabase, load_data_from_file, filter_by_league
-from preprocess import preprocess_dataframe
 
 # -----------------------------
 # Moduli Analisi
 # -----------------------------
-from analysis.macros import run_macro_stats
-from analysis.team_stats import run_team_stats
-from analysis.pre_match import run_pre_match
-from analysis.correct_score_ev import run_correct_score_ev
-from analysis.live_minute import run_live_minute_analysis
-from analysis.partite_del_giorno import run_partite_del_giorno
-from analysis.reverse_engineering import run_reverse_engineering
+try:
+    from analysis.macros import run_macro_stats
+    from analysis.team_stats import run_team_stats
+    from analysis.pre_match import run_pre_match
+    from analysis.correct_score_ev import run_correct_score_ev
+    from analysis.live_minute import run_live_minute_analysis
+    from analysis.partite_del_giorno import run_partite_del_giorno
+    from analysis.reverse_engineering import run_reverse_engineering
+except ModuleNotFoundError:
+    # fallback se analysis/ è al livello corrente
+    from macros import run_macro_stats
+    from team_stats import run_team_stats
+    from pre_match import run_pre_match
+    from correct_score_ev import run_correct_score_ev
+    from live_minute import run_live_minute_analysis
+    from partite_del_giorno import run_partite_del_giorno
+    from reverse_engineering import run_reverse_engineering
 
 # =======================================================
 # Configurazione pagina
