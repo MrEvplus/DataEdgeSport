@@ -1,20 +1,34 @@
-# app.py - Trading Dashboard V2.0
-
-# app.py - Trading Dashboard V2.0 (fix import)
+# app.py — Trading Dashboard V2.0 (robust path & clean imports)
 
 import os, sys
 import streamlit as st
 import pandas as pd
 
-# Assicura che Python veda la cartella del file come root import
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-if APP_DIR not in sys.path:
-    sys.path.insert(0, APP_DIR)
+# ------------------------------------------------------------------
+# PATH FIX: consente import sia se i moduli sono nella stessa cartella
+# di app.py, sia se sono nella cartella "parent" (repo root).
+# Es: .../repo/dataedgesport/app.py  e .../repo/loader.py
+# ------------------------------------------------------------------
+APP_DIR = os.path.dirname(os.path.abspath(__file__))          # .../dataedgesport  (o repo root)
+PARENT_DIR = os.path.dirname(APP_DIR)                         # repo root (se app.py è in sottocartella)
+for p in (APP_DIR, PARENT_DIR):
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
+# -----------------------------
+# Config & Data
+# -----------------------------
 from config import LEAGUE_MAPPING
-from loader import load_data_from_supabase, load_data_from_file, filter_by_league
+from loader import (
+    load_data_from_supabase,
+    load_data_from_file,
+    filter_by_league,
+)
 from preprocess import preprocess_dataframe
 
+# -----------------------------
+# Moduli Analisi
+# -----------------------------
 from macros import run_macro_stats
 from team_stats import run_team_stats
 from pre_match import run_pre_match
@@ -78,6 +92,10 @@ if df is None or len(df) == 0:
 # =======================================================
 df = preprocess_dataframe(df)
 
+# Alias di colonna per evitare rotture dovute a maiuscole/minuscole diverse
+if "Odd Home" in df.columns and "Odd home" not in df.columns:
+    df["Odd home"] = df["Odd Home"]
+
 # =======================================================
 # Filtro campionato (League)
 # =======================================================
@@ -112,9 +130,7 @@ with st.expander("✅ Colonne presenti nel dataset", expanded=False):
 # Selezione stagioni (se disponibile)
 # =======================================================
 if "Stagione" in df.columns:
-    stagioni_disponibili = sorted(
-        [s for s in df["Stagione"].dropna().unique().tolist()],
-    )
+    stagioni_disponibili = sorted(df["Stagione"].dropna().unique().tolist())
     if stagioni_disponibili:
         opzione_range = st.sidebar.selectbox(
             "Seleziona un intervallo stagioni:",
