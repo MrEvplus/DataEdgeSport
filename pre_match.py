@@ -397,7 +397,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                     index=0,
                     key=_k("stagioni_preset"),
                 )
-                # Applica preset
                 if preset != "Tutte" and seasons_desc:
                     n = int(preset.split()[-1])
                     seasons_selected = seasons_desc[:n]
@@ -412,6 +411,14 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
 
     # ======== Ricerca rapida + assegnazione ruolo ========
     all_teams = sorted(set(df["Home"].dropna().unique()) | set(df["Away"].dropna().unique()))
+
+    # --- Gestione swap "deferred": se c'è un trigger, pulisco i key PRIMA di creare i widget
+    if st.session_state.get(_k("swap_trigger")):
+        # Pulisco i key dei widget per permettere nuovi default
+        st.session_state.pop(_k("squadra_casa"), None)
+        st.session_state.pop(_k("squadra_ospite"), None)
+        st.session_state[_k("swap_trigger")] = False  # reset
+
     with st.expander("🔎 Ricerca rapida squadre (assegna come Casa/Ospite)", expanded=True):
         col_search, col_role, col_btn = st.columns([2, 1, 1])
         with col_search:
@@ -463,14 +470,21 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     with col_swap:
         st.write("")
         if st.button("🔁 Inverti", use_container_width=True, key=_k("swap")):
-            old_home = st.session_state.get(_k("squadra_casa"), squadra_casa)
-            old_away = st.session_state.get(_k("squadra_ospite"), all_teams[default_away])
-            st.session_state[_k("squadra_casa")] = old_away
-            st.session_state[_k("squadra_ospite")] = old_home
-            try:
-                st.rerun()
-            except Exception:
-                st.experimental_rerun()
+            # Prelevo i valori correnti in modo sicuro
+            current_home = st.session_state.get(_k("squadra_casa"), all_teams[default_home])
+            current_away = st.session_state.get(_k("squadra_ospite"), all_teams[default_away])
+            # Anti-duplicato: se identici, non ha senso invertire
+            if current_home == current_away:
+                st.warning("⚠️ Casa e Ospite sono uguali: invertire non ha effetto.")
+            else:
+                # Aggiorno query params per i default del prossimo run
+                _set_qparams(home=current_away, away=current_home)
+                # Segnalo che devo pulire i key widget al prossimo run
+                st.session_state[_k("swap_trigger")] = True
+                try:
+                    st.rerun()
+                except Exception:
+                    st.experimental_rerun()
     with col_sel2:
         squadra_ospite = st.selectbox("Seleziona Squadra Ospite", options=all_teams, index=default_away, key=_k("squadra_ospite"))
 
@@ -673,14 +687,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             df_out.insert(0, "Scope", title)
             return df_out
 
-        # Campionato / Label
         df_roi_league = _roi_table_for(df_ev_scope, "Campionato/Label")
-
-        # Squadra Casa @ Casa
         df_home_ctx = df[(df["Home"] == squadra_casa)].dropna(subset=["Home Goal FT", "Away Goal FT"]).copy()
         df_roi_home = _roi_table_for(df_home_ctx, f"{squadra_casa} @Casa")
-
-        # Squadra Ospite @ Trasferta
         df_away_ctx = df[(df["Away"] == squadra_ospite)].dropna(subset=["Home Goal FT", "Away Goal FT"]).copy()
         df_roi_away = _roi_table_for(df_away_ctx, f"{squadra_ospite} @Trasferta")
 
@@ -798,7 +807,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         )
         _download_df_button(df_ev_squadre, "ev_storico_squadre.csv", "⬇️ Scarica EV Storico CSV")
 
-        # Grafico comparativo
         st.subheader("📊 Probabilità storiche – confronto scope")
         prob_rows = []
         for _, r in df_ev_squadre.iterrows():
