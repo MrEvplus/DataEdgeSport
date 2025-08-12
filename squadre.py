@@ -14,8 +14,6 @@ import streamlit as st
 # Helpers generali
 # =========================================================
 def _ensure_str_with_unknown(s: pd.Series, default: str = "Unknown") -> pd.Series:
-    """Converte la Serie in stringa e rimpiazza NA/vuoti con 'default'.
-    Robusto anche con dtype Categorical (evita TypeError su fillna)."""
     if s is None:
         return pd.Series(dtype="string")
     try:
@@ -28,23 +26,18 @@ def _ensure_str_with_unknown(s: pd.Series, default: str = "Unknown") -> pd.Serie
         s = s.astype("string").fillna(default)
     return s.replace("", default)
 
-
 def _coerce_num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
-
 def _season_sort_key(s: str) -> int:
-    """Estrae l'anno più recente dalla stringa per l'ordinamento desc."""
     if not isinstance(s, str):
         s = str(s)
     yrs = [int(x) for x in re.findall(r"\d{4}", s)]
     return max(yrs) if yrs else -1
 
-
 def _seasons_desc(unique_seasons: list) -> list[str]:
     arr = [str(x) for x in unique_seasons if pd.notna(x)]
     return sorted(arr, key=_season_sort_key, reverse=True)
-
 
 def _limit_last_n(df_in: pd.DataFrame, n: int) -> pd.DataFrame:
     if n and n > 0 and "Data" in df_in.columns:
@@ -55,7 +48,6 @@ def _limit_last_n(df_in: pd.DataFrame, n: int) -> pd.DataFrame:
         return tmp.head(n)
     return df_in
 
-
 def _quality_label(n: int) -> str:
     if n >= 50:
         return "ALTO"
@@ -65,11 +57,40 @@ def _quality_label(n: int) -> str:
 
 
 # =========================================================
-# Entry point "classico" (se vuoi usare la pagina autonoma)
+# Quote condivise (sincronizzate con pre_match)
+# =========================================================
+_SHARED_PREFIX = "prematch:shared:"
+
+def _shared_key(name: str) -> str:
+    return f"{_SHARED_PREFIX}{name}"
+
+def _init_shared_quotes():
+    defaults = {"ov15": 2.00, "ov25": 2.00, "ov35": 2.00, "btts": 2.00}
+    for k, v in defaults.items():
+        st.session_state.setdefault(_shared_key(k), v)
+
+def _shared_number_input(label: str, shared_name: str, local_key: str,
+                         min_value: float = 1.01, step: float = 0.01):
+    _init_shared_quotes()
+    if local_key not in st.session_state:
+        st.session_state[local_key] = float(st.session_state[_shared_key(shared_name)])
+
+    def _on_change():
+        st.session_state[_shared_key(shared_name)] = float(st.session_state[local_key])
+
+    return st.number_input(
+        label,
+        min_value=min_value,
+        step=step,
+        key=local_key,
+        on_change=_on_change,
+    )
+
+
+# =========================================================
+# Entry point classico (facoltativo)
 # =========================================================
 def run_team_stats(df: pd.DataFrame, db_selected: str):
-    """Pagina autonoma (storica). Per l'uso nel tab di Confronto pre-match
-    preferisci `render_team_stats_tab` qui sotto."""
     st.header("📊 Statistiche per Squadre")
     _render_setup_and_body(df, db_selected, is_embedded=False)
 
@@ -83,8 +104,6 @@ def render_team_stats_tab(
     squadra_casa: str,
     squadra_ospite: str,
 ):
-    """Render della sezione *Statistiche squadre* da includere dentro
-    Confronto pre-match. Usa un filtro stagioni **indipendente**."""
     _render_setup_and_body(
         df=df_league_all,
         db_selected=league_code,
@@ -95,7 +114,7 @@ def render_team_stats_tab(
 
 
 # =========================================================
-# Corpo pagina/tab (con UI e calcoli)
+# Corpo pagina/tab
 # =========================================================
 def _render_setup_and_body(
     df: pd.DataFrame,
@@ -104,13 +123,14 @@ def _render_setup_and_body(
     squadra_casa: str | None = None,
     squadra_ospite: str | None = None,
 ):
-    # --- Normalizzazioni base
     if "country" not in df.columns:
         st.error("Colonna 'country' mancante.")
         st.stop()
     if "Home" not in df.columns or "Away" not in df.columns:
         st.error("Colonne 'Home' e/o 'Away' mancanti.")
         st.stop()
+
+    _init_shared_quotes()  # ➜ quote condivise pronte
 
     df = df.copy()
     df["country"] = _ensure_str_with_unknown(df["country"], "Unknown").str.strip().str.upper()
@@ -144,18 +164,19 @@ def _render_setup_and_body(
         with cB:
             preset = st.selectbox(
                 "Intervallo rapido",
-                options=["Tutte", "Ultime 10", "Ultime 5", "Ultime 3", "Ultime 2", "Ultime 1"],
-                index=0,
+                options=["Tutte", "Stagione in corso", "Ultime 10", "Ultime 5", "Ultime 3", "Ultime 2", "Ultime 1"],
+                index=1 if latest else 0,
                 key="teams:seasons_preset",
             )
-            if preset != "Tutte" and seasons_desc:
+            if preset == "Stagione in corso":
+                seasons_selected = seasons_desc[:1] if seasons_desc else []
+            elif preset != "Tutte" and seasons_desc:
                 try:
                     n = int(preset.split()[-1])
                 except Exception:
                     n = 1
                 seasons_selected = seasons_desc[:n]
             else:
-                # Tutte
                 seasons_selected = []
 
         if seasons_selected:
@@ -175,7 +196,6 @@ def _render_setup_and_body(
         with col2:
             squadra_ospite = st.selectbox("Seleziona Squadra Ospite (facoltativa)", options=[""] + teams_available, key="teams:away")
     else:
-        # dentro Confronto pre-match: arrivano già impostate
         if not squadra_casa or not squadra_ospite:
             st.info("Seleziona **entrambe** le squadre nella parte alta della pagina pre-match.")
             return
@@ -188,8 +208,8 @@ def _render_setup_and_body(
     # ==========================
     st.subheader("📌 KPI Macro (contesto corretto)")
     st.markdown(
-        "Le metriche sono calcolate su partite **Home@Casa** per la squadra di casa e **Away@Trasferta** per la squadra ospite. "
-        "BTTS% = percentuale di partite con gol di entrambe le squadre."
+        "Metriche calcolate su **Home@Casa** per la squadra di casa e **Away@Trasferta** per la squadra ospite. "
+        "BTTS% = percentuale partite con gol di entrambe."
     )
 
     stats_home = compute_team_macro_stats(df, squadra_casa, "Home")
@@ -228,26 +248,19 @@ def _render_setup_and_body(
     # Goal Patterns & Fasce Minuto
     # ==========================
     st.subheader("🎯 Goal patterns e distribuzione per fasce minuto")
-    st.markdown(
-        "Analisi sequenziale dei gol (primo/ultimo gol, transizioni 1-0→2-0 o 1-1) e distribuzione **Segnati/Subiti** su intervalli: "
-        "`0-15, 16-30, 31-45, 46-60, 61-75, 76-120`."
-    )
 
-    # Casa (match giocati in casa)
     df_home = df[df["Home"].astype("string") == squadra_casa].copy()
     if not df_home.empty:
         mask_played_home = df_home.apply(is_match_played, axis=1)
         df_home = df_home[mask_played_home]
     total_home = len(df_home)
 
-    # Ospite (match giocati in trasferta)
     df_away = df[df["Away"].astype("string") == squadra_ospite].copy()
     if not df_away.empty:
         mask_played_away = df_away.apply(is_match_played, axis=1)
         df_away = df_away[mask_played_away]
     total_away = len(df_away)
 
-    # Calcoli e visual
     if total_home > 0:
         patterns_home, tf_scored_home, tf_conceded_home = compute_goal_patterns(df_home, "Home", total_home)
         tf_scored_home_pct = _tf_to_pct(tf_scored_home)
@@ -297,37 +310,32 @@ def _render_setup_and_body(
         st.altair_chart(ch, use_container_width=True)
     if patterns_away:
         st.markdown(f"**Distribuzione Goal – {squadra_ospite} (Away)**")
-        ca = plot_timeframe_goals(tf_scored_away, tf_conceded_away, tf_scored_away_pct, tf_conceded_away_pct, squadra_ospite)
+        ca = plot_timeframe_goals(tf_scored_away, tf_conceded_away, tf_conceded_away_pct, tf_conceded_away_pct, squadra_ospite)
         st.altair_chart(ca, use_container_width=True)
 
     st.divider()
 
     # ==========================
-    # EV Consigliato per il match
+    # EV Consigliato per il match (quote condivise)
     # ==========================
     st.subheader("🏅 EV consigliato (storico)")
     st.markdown(
-        "Stima EV per mercati **Over 1.5 / Over 2.5 / Over 3.5 / BTTS** in vari scope:\n"
-        "- **Home@Casa** (partite della squadra di casa giocate in casa),\n"
-        "- **Away@Trasferta** (partite della squadra ospite giocate in trasferta),\n"
-        "- **Blended** (media H@Casa e A@Trasferta),\n"
-        "- **Head-to-Head** (scontri diretti).\n\n"
-        "EV = `quota × prob − 1`. Valuta sempre la **qualità** del campione (BASSO/MEDIO/ALTO)."
+        "EV per **Over 1.5 / 2.5 / 3.5 / BTTS** in vari scope (Home@Casa, Away@Trasferta, Blended, Head-to-Head). "
+        "EV = quota × prob − 1. Valuta la **Qualità** del campione."
     )
 
     e1, e2, e3, e4, e5 = st.columns([1, 1, 1, 1, 1])
     with e1:
-        q15 = st.number_input("Quota Over 1.5", min_value=1.01, step=0.01, value=2.00, key="teams:q15")
+        q15 = _shared_number_input("Quota Over 1.5", "ov15", "teams:q_ov15")
     with e2:
-        q25 = st.number_input("Quota Over 2.5", min_value=1.01, step=0.01, value=2.00, key="teams:q25")
+        q25 = _shared_number_input("Quota Over 2.5", "ov25", "teams:q_ov25")
     with e3:
-        q35 = st.number_input("Quota Over 3.5", min_value=1.01, step=0.01, value=2.00, key="teams:q35")
+        q35 = _shared_number_input("Quota Over 3.5", "ov35", "teams:q_ov35")
     with e4:
-        qgg = st.number_input("Quota BTTS",      min_value=1.01, step=0.01, value=2.00, key="teams:qgg")
+        qgg = _shared_number_input("Quota BTTS",     "btts", "teams:q_btts")
     with e5:
         last_n = st.slider("Ultimi N match (0=tutti)", min_value=0, max_value=50, value=0, key="teams:lastn")
 
-    # Preparo contesti per EV (con eventuale limitazione ultimi N)
     df_home_ctx = _limit_last_n(df_home, last_n)
     df_away_ctx = _limit_last_n(df_away, last_n)
     df_h2h = df[
@@ -342,13 +350,11 @@ def _render_setup_and_body(
         q15, q25, q35, qgg
     )
 
-    # Best EV card
     if best and best["ev"] > 0:
         _best_ev_card(best)
     else:
         st.info("Nessun EV > 0 con le quote inserite (nei campioni disponibili).")
 
-    # Tabella EV
     st.dataframe(
         df_ev,
         use_container_width=True,
@@ -411,13 +417,10 @@ def compute_team_macro_stats(df: pd.DataFrame, team: str, venue: str) -> dict:
 # Match giocato?
 # =========================================================
 def is_match_played(row) -> bool:
-    # minuti goal (possono mancare o non essere stringa)
     m_home = str(row.get("minuti goal segnato home", "") or "").strip()
     m_away = str(row.get("minuti goal segnato away", "") or "").strip()
     if m_home != "" or m_away != "":
         return True
-
-    # fallback su punteggi finali
     hg = row.get("Home Goal FT", None)
     ag = row.get("Away Goal FT", None)
     return pd.notna(hg) and pd.notna(ag)
@@ -436,7 +439,6 @@ def parse_goal_times(val):
             out.append(int(p))
     return out
 
-
 def build_timeline(row, venue):
     try:
         h_goals = parse_goal_times(row.get("minuti goal segnato home", ""))
@@ -447,7 +449,6 @@ def build_timeline(row, venue):
             tl.sort(key=lambda x: x[1])
             return tl
 
-        # timeline vuota → costruisco timeline “flat” da FT
         hg_raw = row.get("Home Goal FT", 0)
         ag_raw = row.get("Away Goal FT", 0)
         hg = int(hg_raw) if pd.notna(hg_raw) else 0
@@ -523,7 +524,6 @@ def compute_goal_patterns(df_team: pd.DataFrame, venue: str, total_matches: int)
                         if team_char == "A": tf_scored[f"{start}-{end}"] += 1
                         else:                tf_conceded[f"{start}-{end}"] += 1
 
-        # transizioni
         if venue == "Home":
             if first == "H":
                 one_zero += 1
@@ -561,7 +561,6 @@ def compute_goal_patterns(df_team: pd.DataFrame, venue: str, total_matches: int)
 
     two_up = int((np.abs(_coerce_num(df_team["Home Goal FT"]) - _coerce_num(df_team["Away Goal FT"])) >= 2).sum())
 
-    # 1T / 2T
     ht_home_win = int((_coerce_num(df_team["Home Goal 1T"]) > _coerce_num(df_team["Away Goal 1T"])).sum())
     ht_draw     = int((_coerce_num(df_team["Home Goal 1T"]) == _coerce_num(df_team["Away Goal 1T"])).sum())
     ht_away_win = int((_coerce_num(df_team["Home Goal 1T"]) < _coerce_num(df_team["Away Goal 1T"])).sum())
@@ -600,7 +599,6 @@ def compute_goal_patterns(df_team: pd.DataFrame, venue: str, total_matches: int)
     }
 
     return patterns, tf_scored, tf_conceded
-
 
 def _tf_to_pct(tf_dict: dict[str, int]) -> dict[str, float]:
     tot = sum(tf_dict.values())
@@ -683,7 +681,6 @@ def goal_pattern_keys():
         keys.append(f"{a}-{b} Goals %")
     return keys
 
-
 def goal_pattern_keys_without_tf():
     return [
         "P", "Win %", "Draw %", "Loss %", "0-0 %",
@@ -735,7 +732,6 @@ def _market_prob(df: pd.DataFrame, market: str, line: float | None) -> float:
     else:
         ok = (goals > float(line)).mean() if line is not None else 0.0
     return round(float(ok) * 100, 2)
-
 
 def _build_ev_table(
     df_home_ctx: pd.DataFrame,
@@ -790,7 +786,6 @@ def _build_ev_table(
             "Match H2H": n_h2h,
         })
 
-        # Candidati al "Best EV": preferisci Blended (più stabile), poi H2H
         candidates += [
             {"scope": "Blended", "mercato": name, "quota": q, "prob": p_blnd, "ev": ev_blnd, "campione": n_h + n_a, "qualita": qual_blnd},
             {"scope": "Head-to-Head", "mercato": name, "quota": q, "prob": p_h2h, "ev": ev_h2h, "campione": n_h2h, "qualita": qual_h2h},
@@ -799,14 +794,12 @@ def _build_ev_table(
     df_ev = pd.DataFrame(rows)
 
     best = None
-    # Ordina per EV desc, a parità preferisci Blended
     for c in sorted(candidates, key=lambda x: (x["ev"], 1 if x["scope"] == "Blended" else 0), reverse=True):
         if c["ev"] > 0:
             best = c
             break
 
     return df_ev, best
-
 
 def _best_ev_card(best: dict):
     bg = "#052e16"
@@ -823,7 +816,7 @@ def _best_ev_card(best: dict):
                 <div style="font-size:16px;">Campione: <b>{best['campione']}</b> ({best['qualita']})</div>
             </div>
             <div style="font-size:12px;opacity:.8;margin-top:6px;">
-                Nota: EV stimato su storico; verifica sempre la coerenza con il contesto attuale (assenze, forma, motivazioni).
+                Nota: EV stimato su storico; verifica sempre la coerenza con il contesto attuale.
             </div>
         </div>
         """,
@@ -832,10 +825,9 @@ def _best_ev_card(best: dict):
 
 
 # =========================================================
-# (Legacy) Se vuoi mantenere funzioni di visualizzazione stand-alone
+# Stand-alone di compatibilità (se usati altrove)
 # =========================================================
 def show_team_macro_stats(df, team, venue):
-    """Mantengo per compatibilità con codice esistente."""
     stats = compute_team_macro_stats(df, team, venue)
     if not stats:
         st.info(f"⚠️ Nessuna partita utile per {team} ({venue}).")
@@ -843,9 +835,7 @@ def show_team_macro_stats(df, team, venue):
     df_stats = pd.DataFrame([stats]).set_index(pd.Index([venue]))
     st.dataframe(df_stats, use_container_width=True)
 
-
 def show_goal_patterns(df, team1, team2, country, stagione):
-    """Mantengo per compatibilità: versione singola stagione + lega."""
     df = df.copy()
     df = df[(df["country"] == country) & (df["Stagione"].astype("string") == str(stagione))]
 

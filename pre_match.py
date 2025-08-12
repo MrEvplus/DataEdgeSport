@@ -52,9 +52,6 @@ def _coerce_float(s: pd.Series) -> pd.Series:
         return pd.Series(dtype="float")
     return pd.to_numeric(_ensure_str(s).str.replace(",", ".", regex=False), errors="coerce")
 
-def _coerce_int_series(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce").astype("Int64")
-
 def _first_present(cols: list[str], columns: pd.Index) -> str | None:
     for c in cols:
         if c in columns:
@@ -116,6 +113,48 @@ def _seasons_desc(unique_seasons: list) -> list[str]:
 
 
 # ==========================
+# Quote condivise (sincronizzate tra tab)
+# ==========================
+_SHARED_PREFIX = "prematch:shared:"
+
+def _shared_key(name: str) -> str:
+    return f"{_SHARED_PREFIX}{name}"
+
+def _init_shared_quotes():
+    defaults = {"ov15": 2.00, "ov25": 2.00, "ov35": 2.00, "btts": 2.00}
+    for k, v in defaults.items():
+        st.session_state.setdefault(_shared_key(k), v)
+
+def _shared_number_input(label: str, shared_name: str, local_key: str,
+                         min_value: float = 1.01, step: float = 0.01):
+    """Widget locale che scrive sulle quote condivise."""
+    _init_shared_quotes()
+    # mantieni il locale allineato allo shared
+    if local_key not in st.session_state:
+        st.session_state[local_key] = float(st.session_state[_shared_key(shared_name)])
+
+    def _on_change():
+        st.session_state[_shared_key(shared_name)] = float(st.session_state[local_key])
+
+    return st.number_input(
+        label,
+        min_value=min_value,
+        step=step,
+        key=local_key,
+        on_change=_on_change,
+    )
+
+def _get_shared_quotes() -> dict:
+    _init_shared_quotes()
+    return {
+        "ov15": float(st.session_state[_shared_key("ov15")]),
+        "ov25": float(st.session_state[_shared_key("ov25")]),
+        "ov35": float(st.session_state[_shared_key("ov35")]),
+        "btts": float(st.session_state[_shared_key("btts")]),
+    }
+
+
+# ==========================
 # League data by Label (robusta)
 # ==========================
 def _league_data_by_label(df: pd.DataFrame, label: str) -> dict | None:
@@ -123,7 +162,6 @@ def _league_data_by_label(df: pd.DataFrame, label: str) -> dict | None:
     if "Label" not in df.columns:
         df["Label"] = df.apply(label_match, axis=1)
 
-    # Coercizioni sicure per esito
     hft = pd.to_numeric(df["Home Goal FT"], errors="coerce")
     aft = pd.to_numeric(df["Away Goal FT"], errors="coerce")
     df["__res__"] = np.where(hft > aft, "Home Win", np.where(hft < aft, "Away Win", "Draw"))
@@ -140,14 +178,13 @@ def _league_data_by_label(df: pd.DataFrame, label: str) -> dict | None:
 
 
 # ==========================
-# Back/Lay 1X2 su dataset (robusto)
+# Back/Lay 1X2 (robusto)
 # ==========================
 def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
     if df.empty:
         zero = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
         return zero, zero, zero, zero, 0
 
-    # quote
     for c in ("Odd home", "Odd Draw", "Odd Away"):
         if c in df.columns:
             df[c] = _coerce_float(df[c])
@@ -174,19 +211,16 @@ def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
             "DRAW": float(row.get("Odd Draw", np.nan)),
             "AWAY": float(row.get("Odd Away", np.nan)),
         }
-        # fallback minimi
         for k, v in prices.items():
             if not (v and v > 1.0 and np.isfinite(v)):
                 prices[k] = 2.0
 
         for outcome in ("HOME", "DRAW", "AWAY"):
             p = prices[outcome]
-            # Back
             if result == outcome:
                 profits_back[outcome] += (p - 1) * (1 - commission)
             else:
                 profits_back[outcome] -= 1
-            # Lay
             stake = 1.0 / (p - 1.0)
             if result != outcome:
                 profits_lay[outcome] += stake
@@ -355,6 +389,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     st.title("📊 Pre-Match – Analisi per Trader Professionisti")
 
     qin = _get_qparams()
+    _init_shared_quotes()  # prepara le quote condivise
 
     # Normalizzazione e filtro league
     if "country" not in df.columns:
@@ -385,7 +420,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         with st.expander("⚙️ Filtro Stagioni", expanded=True):
             st.markdown(
                 "Seleziona la profondità storica da analizzare. "
-                "**Intervallo rapido** applica un conteggio dalla stagione più recente verso il passato."
+                "**Intervallo rapido** parte dalla **stagione più recente** verso il passato."
             )
             colA, colB = st.columns([2, 1])
             with colA:
@@ -398,11 +433,13 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             with colB:
                 preset = st.selectbox(
                     "Intervallo rapido",
-                    options=["Tutte", "Ultime 10", "Ultime 5", "Ultime 3", "Ultime 2", "Ultime 1"],
+                    options=["Tutte", "Stagione in corso", "Ultime 10", "Ultime 5", "Ultime 3", "Ultime 2", "Ultime 1"],
                     index=0,
                     key=_k("stagioni_preset"),
                 )
-                if preset != "Tutte" and seasons_desc:
+                if preset == "Stagione in corso":
+                    seasons_selected = seasons_desc[:1] if seasons_desc else []
+                elif preset != "Tutte" and seasons_desc:
                     n = int(preset.split()[-1])
                     seasons_selected = seasons_desc[:n]
                 elif preset == "Tutte":
@@ -417,7 +454,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     # ======== Ricerca rapida + assegnazione ruolo ========
     all_teams = sorted(set(df["Home"].dropna().unique()) | set(df["Away"].dropna().unique()))
 
-    # Gestione swap “deferred”
     if st.session_state.get(_k("swap_trigger")):
         st.session_state.pop(_k("squadra_casa"), None)
         st.session_state.pop(_k("squadra_ospite"), None)
@@ -461,12 +497,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 except Exception:
                     st.warning("Impossibile assegnare la squadra. Riprova.")
 
-    # ======== Selettori Squadre finali + Swap rapido ========
-    qp_home = qin.get("home") if isinstance(qin.get("home"), str) else (qin.get("home", [""])[0] if qin.get("home") else "")
-    qp_away = qin.get("away") if isinstance(qin.get("away"), str) else (qin.get("away", [""])[0] if qin.get("away") else "")
-
-    default_home = all_teams.index(qp_home) if qp_home in all_teams else 0
-    default_away = all_teams.index(qp_away) if qp_away in all_teams else (1 if len(all_teams) > 1 else 0)
+    # ======== Selettori Squadre finali + Swap ========
+    default_home = 0
+    default_away = 1 if len(all_teams) > 1 else 0
 
     col_sel1, col_swap, col_sel2 = st.columns([2, 0.5, 2])
     with col_sel1:
@@ -499,13 +532,13 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     )
     c1, c2, c3 = st.columns(3)
     with c1:
-        odd_home = st.number_input("Quota Vincente Casa", min_value=1.01, step=0.01, value=float(qin.get("qh", 2.00)), key=_k("quota_home"))
+        odd_home = st.number_input("Quota Vincente Casa", min_value=1.01, step=0.01, value=2.00, key=_k("quota_home"))
         st.caption(f"Prob. Casa ({squadra_casa}): **{round(100/odd_home, 2)}%**")
     with c2:
-        odd_draw = st.number_input("Quota Pareggio", min_value=1.01, step=0.01, value=float(qin.get("qd", 3.20)), key=_k("quota_draw"))
+        odd_draw = st.number_input("Quota Pareggio", min_value=1.01, step=0.01, value=3.20, key=_k("quota_draw"))
         st.caption(f"Prob. Pareggio: **{round(100/odd_draw, 2)}%**")
     with c3:
-        odd_away = st.number_input("Quota Vincente Ospite", min_value=1.01, step=0.01, value=float(qin.get("qa", 3.80)), key=_k("quota_away"))
+        odd_away = st.number_input("Quota Vincente Ospite", min_value=1.01, step=0.01, value=3.80, key=_k("quota_away"))
         st.caption(f"Prob. Ospite ({squadra_ospite}): **{round(100/odd_away, 2)}%**")
 
     label = _label_from_odds(float(odd_home), float(odd_away))
@@ -533,8 +566,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.markdown(
             "**Cosa vedi qui**: confronto 1X2 tra campionato/label e le due squadre nel loro contesto "
             "(Casa per la squadra Home, Trasferta per la squadra Away). "
-            "**Win%** sono le frequenze storiche; **Back/Lay ROI** sono profitti medi per scommessa, "
-            "positivi verdi, negativi rossi."
+            "**Win%** sono le frequenze storiche; **Back/Lay ROI** sono profitti medi per scommessa."
         )
 
         df_league_scope = df[df["Label"] == label] if label else df
@@ -668,22 +700,23 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         OVER35_COLS = ["cotao3", "Odd Over 3.5", "odd over 3,5", "Over 3.5"]
         BTTS_YES_COLS = ["gg", "GG", "odd goal", "BTTS Yes", "Odd BTTS Yes"]
 
+        # 🔗 Quote condivise (ogni tab ha chiavi locali diverse)
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            q_ov15 = st.number_input("📥 Quota Over 1.5 (fallback)", min_value=1.01, step=0.01, value=2.00, key=_k("q_ov15"))
+            q_ov15 = _shared_number_input("📥 Quota Over 1.5 (fallback)", "ov15", _k("roi:q_ov15"))
         with c2:
-            q_ov25 = st.number_input("📥 Quota Over 2.5 (fallback)", min_value=1.01, step=0.01, value=2.00, key=_k("q_ov25"))
+            q_ov25 = _shared_number_input("📥 Quota Over 2.5 (fallback)", "ov25", _k("roi:q_ov25"))
         with c3:
-            q_ov35 = st.number_input("📥 Quota Over 3.5 (fallback)", min_value=1.01, step=0.01, value=2.00, key=_k("q_ov35"))
+            q_ov35 = _shared_number_input("📥 Quota Over 3.5 (fallback)", "ov35", _k("roi:q_ov35"))
         with c4:
-            q_btts = st.number_input("📥 Quota BTTS (fallback)", min_value=1.01, step=0.01, value=2.00, key=_k("q_btts"))
+            q_btts = _shared_number_input("📥 Quota BTTS (fallback)",    "btts", _k("roi:q_btts"))
 
         def _roi_table_for(df_scope: pd.DataFrame, title: str) -> pd.DataFrame:
             table_data = [
                 _calc_market_roi(df_scope, "Over 1.5", OVER15_COLS, 1.5, commission, q_ov15),
                 _calc_market_roi(df_scope, "Over 2.5", OVER25_COLS, 2.5, commission, q_ov25),
                 _calc_market_roi(df_scope, "Over 3.5", OVER35_COLS, 3.5, commission, q_ov35),
-                _calc_market_roi(df_scope, "BTTS", BTTS_YES_COLS, None, commission, q_btts),
+                _calc_market_roi(df_scope, "BTTS",     BTTS_YES_COLS, None, commission, q_btts),
             ]
             df_out = pd.DataFrame(table_data)
             df_out.insert(0, "Scope", title)
@@ -712,20 +745,15 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         _download_df_button(df_roi_all, "roi_markets_all_scopes.csv", "⬇️ Scarica ROI mercati (tutti gli scope)")
 
     # ==========================
-    # TAB 3: EV Storico – Squadre selezionate + KPI Best EV
+    # TAB 3: EV Storico – Squadre + KPI Best EV
     # ==========================
     with tab_ev:
         st.markdown(
-            "**Cosa vedi qui**: stime di Probabilità (%) dei mercati per i tre contesti:\n"
-            "- **Home@Casa**: partite della squadra di casa giocate in casa.\n"
-            "- **Away@Trasferta**: partite della squadra ospite giocate in trasferta.\n"
-            "- **Blended**: media semplice fra Home@Casa e Away@Trasferta (stabilizza la stima).\n"
-            "- **Head-to-Head**: scontri diretti fra le due squadre.\n\n"
-            "La colonna **Qualità** (BASSO/MEDIO/ALTO) indica la **solidità del campione** usato.\n"
-            "L'**EV** è calcolato come `quota * p - 1`. Un EV positivo è verde (potenziale overlay), negativo rosso."
+            "**Cosa vedi qui**: stime di Probabilità (%) per Home@Casa, Away@Trasferta, Blended, Head-to-Head. "
+            "EV = quota × p − 1. Colonna **Qualità** = solidità del campione."
         )
         use_label = st.checkbox("Usa il filtro Label (se disponibile)", value=True if label else False, key=_k("use_label_ev_squadre"))
-        last_n = st.slider("Limita agli ultimi N match (0 = tutti)", 0, 50, int(_get_qparams().get("n", 0) or 0), key=_k("last_n_ev"))
+        last_n = st.slider("Limita agli ultimi N match (0 = tutti)", 0, 50, 0, key=_k("last_n_ev"))
 
         def _limit_last_n(df_in: pd.DataFrame, n: int) -> pd.DataFrame:
             if n and n > 0 and "Data" in df_in.columns:
@@ -753,15 +781,16 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             df_h2h = df_h2h[df_h2h["Label"] == label]
         df_h2h = _limit_last_n(df_h2h.dropna(subset=["Home Goal FT", "Away Goal FT"]), last_n)
 
+        # 🔗 Quote condivise
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            quota_ov15 = st.number_input("Quota Over 1.5", min_value=1.01, step=0.01, value=float(_get_qparams().get("ov15", 2.00) or 2.00), key=_k("ev_ov15"))
+            quota_ov15 = _shared_number_input("Quota Over 1.5", "ov15", _k("ev:q_ov15"))
         with c2:
-            quota_ov25 = st.number_input("Quota Over 2.5", min_value=1.01, step=0.01, value=float(_get_qparams().get("ov25", 2.00) or 2.00), key=_k("ev_ov25"))
+            quota_ov25 = _shared_number_input("Quota Over 2.5", "ov25", _k("ev:q_ov25"))
         with c3:
-            quota_ov35 = st.number_input("Quota Over 3.5", min_value=1.01, step=0.01, value=float(_get_qparams().get("ov35", 2.00) or 2.00), key=_k("ev_ov35"))
+            quota_ov35 = _shared_number_input("Quota Over 3.5", "ov35", _k("ev:q_ov35"))
         with c4:
-            quota_btts = st.number_input("Quota BTTS", min_value=1.01, step=0.01, value=float(_get_qparams().get("btts", 2.00) or 2.00), key=_k("ev_btts"))
+            quota_btts = _shared_number_input("Quota BTTS",     "btts", _k("ev:q_btts"))
 
         df_ev_squadre, best = _build_ev_table(
             df_home_ctx, df_away_ctx, df_h2h,
@@ -776,7 +805,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 f"""
                 <div style="border:1px solid #16a34a;border-radius:10px;padding:14px;background:{bg};color:#e5fff0;">
                     <div style="font-size:14px;opacity:.9;">Miglior opportunità (storico)</div>
-                    <div style="display:flex;gap:20px;align-items:baseline;">
+                    <div style="display:flex;gap:20px;align-items:baseline;flex-wrap:wrap;">
                         <div style="font-size:28px;font-weight:700;">EV {best['ev']:+.2f}</div>
                         <div style="font-size:16px;">Mercato: <b>{best['mercato']}</b></div>
                         <div style="font-size:16px;">Scope: <b>{best['scope']}</b></div>
@@ -809,30 +838,8 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         )
         _download_df_button(df_ev_squadre, "ev_storico_squadre.csv", "⬇️ Scarica EV Storico CSV")
 
-        st.subheader("📊 Probabilità storiche – confronto scope")
-        prob_rows = []
-        for _, r in df_ev_squadre.iterrows():
-            prob_rows += [
-                {"Mercato": r["Mercato"], "Scope": f"{squadra_casa} @Casa", "Prob %": r[f"{squadra_casa} @Casa %"]},
-                {"Mercato": r["Mercato"], "Scope": f"{squadra_ospite} @Trasferta", "Prob %": r[f"{squadra_ospite} @Trasferta %"]},
-                {"Mercato": r["Mercato"], "Scope": "Blended", "Prob %": r["Blended %"]},
-                {"Mercato": r["Mercato"], "Scope": "Head-to-Head", "Prob %": r["Head-to-Head %"]},
-            ]
-        df_prob = pd.DataFrame(prob_rows)
-        if not df_prob.empty:
-            chart = alt.Chart(df_prob).mark_bar().encode(
-                x=alt.X("Mercato:N"),
-                y=alt.Y("Prob %:Q"),
-                color=alt.Color("Scope:N"),
-                column=alt.Column("Scope:N", header=alt.Header(title="")),
-                tooltip=["Mercato", "Scope", alt.Tooltip("Prob %:Q", format=".1f")],
-            ).properties(height=300)
-            st.altair_chart(chart, use_container_width=True)
-        else:
-            st.info("Nessun dato per costruire il grafico delle probabilità.")
-
     # ==========================
-    # TAB 4: Statistiche squadre (usa squadre.py) – filtro stagioni indipendente
+    # TAB 4: Statistiche squadre (usa squadre.py)
     # ==========================
     with tab_stats:
         render_team_stats_tab(
@@ -842,16 +849,13 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             squadra_ospite,
         )
 
-    # Aggiorna query params
+    # Aggiorna query params (opzionale)
+    shared = _get_shared_quotes()
     _set_qparams(
         league=league,
         home=squadra_casa,
         away=squadra_ospite,
         q=st.session_state.get(_k("search_team"), "") or "",
         qh=odd_home, qd=odd_draw, qa=odd_away,
-        ov15=locals().get("quota_ov15", 2.00),
-        ov25=locals().get("quota_ov25", 2.00),
-        ov35=locals().get("quota_ov35", 2.00),
-        btts=locals().get("quota_btts", 2.00),
-        n=int(st.session_state.get(_k("last_n_ev"), 0)),
+        ov15=shared["ov15"], ov25=shared["ov25"], ov35=shared["ov35"], btts=shared["btts"],
     )
