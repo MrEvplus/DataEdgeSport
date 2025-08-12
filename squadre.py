@@ -37,30 +37,6 @@ def _seasons_desc(unique_seasons: list) -> list[str]:
     arr = [str(x) for x in unique_seasons if pd.notna(x)]
     return sorted(arr, key=_season_sort_key, reverse=True)
 
-def _pick_current_season(seasons_desc: list[str]) -> list[str]:
-    if not seasons_desc:
-        return []
-    today = date.today()
-    if today.month >= 7:
-        sy, ey = today.year, today.year + 1
-    else:
-        sy, ey = today.year - 1, today.year
-    ey2 = str(ey)[-2:]
-    candidates = [
-        f"{sy}/{ey}", f"{sy}-{ey}",
-        f"{sy}/{ey2}", f"{sy}-{ey2}",
-        f"{sy}–{ey}",  f"{sy}–{ey2}",
-        str(sy), str(ey),
-    ]
-    for cand in candidates:
-        for s in seasons_desc:
-            if s.strip() == cand:
-                return [s]
-    for s in seasons_desc:
-        if str(sy) in s or str(ey) in s:
-            return [s]
-    return seasons_desc[:1]
-
 def _limit_last_n(df_in: pd.DataFrame, n: int) -> pd.DataFrame:
     if n and n > 0 and "Data" in df_in.columns:
         s = pd.to_datetime(df_in["Data"], errors="coerce")
@@ -91,22 +67,14 @@ def _init_shared_quotes():
     for k, v in defaults.items():
         st.session_state.setdefault(_shared_key(k), v)
 
-def _shared_number_input(label: str, shared_name: str, local_key: str,
-                         min_value: float = 1.01, step: float = 0.01):
+def _get_shared_quotes() -> dict:
     _init_shared_quotes()
-    if local_key not in st.session_state:
-        st.session_state[local_key] = float(st.session_state[_shared_key(shared_name)])
-
-    def _on_change():
-        st.session_state[_shared_key(shared_name)] = float(st.session_state[local_key])
-
-    return st.number_input(
-        label,
-        min_value=min_value,
-        step=step,
-        key=local_key,
-        on_change=_on_change,
-    )
+    return {
+        "ov15": float(st.session_state[_shared_key("ov15")]),
+        "ov25": float(st.session_state[_shared_key("ov25")]),
+        "ov35": float(st.session_state[_shared_key("ov35")]),
+        "btts": float(st.session_state[_shared_key("btts")]),
+    }
 
 
 # =========================================================
@@ -166,7 +134,7 @@ def _render_setup_and_body(
     df["Home"] = _ensure_str_with_unknown(df["Home"], "")
     df["Away"] = _ensure_str_with_unknown(df["Away"], "")
 
-    # --- Filtro stagioni (indipendente)
+    # --- Filtro stagioni (solo manuale per questa sezione)
     if "Stagione" not in df.columns:
         st.error("Colonna 'Stagione' mancante.")
         st.stop()
@@ -175,32 +143,12 @@ def _render_setup_and_body(
     latest = seasons_desc[0] if seasons_desc else None
 
     with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
-        cA, cB = st.columns([2, 1])
-        with cA:
-            seasons_selected = st.multiselect(
-                "Seleziona stagioni (manuale)",
-                options=seasons_desc,
-                default=[latest] if latest else [],
-                key="teams:seasons_manual",
-            )
-        with cB:
-            preset = st.selectbox(
-                "Intervallo rapido",
-                options=["Tutte", "Stagione in corso", "Ultime 10", "Ultime 5", "Ultime 3", "Ultime 2", "Ultime 1"],
-                index=1 if latest else 0,
-                key="teams:seasons_preset",
-            )
-            if preset == "Stagione in corso":
-                seasons_selected = _pick_current_season(seasons_desc)
-            elif preset != "Tutte" and seasons_desc:
-                try:
-                    n = int(preset.split()[-1])
-                except Exception:
-                    n = 1
-                seasons_selected = seasons_desc[:n]
-            else:
-                seasons_selected = []
-
+        seasons_selected = st.multiselect(
+            "Scegli le stagioni da includere (se vuoto = tutte)",
+            options=seasons_desc,
+            default=[latest] if latest else [],
+            key="teams:seasons_manual",
+        )
         if seasons_selected:
             st.caption(f"Stagioni attive (sezione Squadre): **{', '.join(seasons_selected)}**")
             df = df[df["Stagione"].astype("string").isin(seasons_selected)].copy()
@@ -341,22 +289,9 @@ def _render_setup_and_body(
     # EV Consigliato per il match (quote condivise)
     # ==========================
     st.subheader("🏅 EV consigliato (storico)")
-    st.markdown(
-        "EV per **Over 1.5 / 2.5 / 3.5 / BTTS** in vari scope (Home@Casa, Away@Trasferta, Blended, Head-to-Head). "
-        "EV = quota × prob − 1. Valuta la **Qualità** del campione."
-    )
+    st.caption("Le quote Over/BTTS utilizzate sono quelle **condivise** inserite nella parte alta della pagina Pre-Match.")
 
-    e1, e2, e3, e4, e5 = st.columns([1, 1, 1, 1, 1])
-    with e1:
-        q15 = _shared_number_input("Quota Over 1.5", "ov15", "teams:q_ov15")
-    with e2:
-        q25 = _shared_number_input("Quota Over 2.5", "ov25", "teams:q_ov25")
-    with e3:
-        q35 = _shared_number_input("Quota Over 3.5", "ov35", "teams:q_ov35")
-    with e4:
-        qgg = _shared_number_input("Quota BTTS",     "btts", "teams:q_btts")
-    with e5:
-        last_n = st.slider("Ultimi N match (0=tutti)", min_value=0, max_value=50, value=0, key="teams:lastn")
+    last_n = st.slider("Ultimi N match (0=tutti)", min_value=0, max_value=50, value=0, key="teams:lastn")
 
     df_home_ctx = _limit_last_n(df_home, last_n)
     df_away_ctx = _limit_last_n(df_away, last_n)
@@ -365,6 +300,9 @@ def _render_setup_and_body(
         ((df["Home"] == squadra_ospite) & (df["Away"] == squadra_casa))
     ].copy()
     df_h2h = _limit_last_n(df_h2h, last_n)
+
+    shared = _get_shared_quotes()
+    q15, q25, q35, qgg = shared["ov15"], shared["ov25"], shared["ov35"], shared["btts"]
 
     df_ev, best = _build_ev_table(
         df_home_ctx, df_away_ctx, df_h2h,

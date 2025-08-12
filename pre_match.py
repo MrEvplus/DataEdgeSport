@@ -566,10 +566,10 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.error("❌ Casa e Ospite non possono essere la stessa squadra. Modifica la selezione o usa 'Inverti'.")
         return
 
-    # ======== Quote 1X2 per Label detection ========
+    # ======== Quote 1X2 e Quote Over/BTTS condivise ========
     st.markdown(
-        "Le quote servono per **classificare** il match in un *label* di equilibrio (es. H_Fav, A_Fav, Balanced), "
-        "utile per filtrare lo storico. Non sono usate per calcoli live."
+        "Le quote 1X2 servono per **classificare** il match in un *label* (es. H_Fav, A_Fav, Balanced). "
+        "Le **quote Over/BTTS** inserite qui sotto sono **condivise** e usate in tutti i tab (ROI, EV, Statistiche)."
     )
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -581,6 +581,17 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     with c3:
         odd_away = st.number_input("Quota Vincente Ospite", min_value=1.01, step=0.01, value=3.80, key=_k("quota_away"))
         st.caption(f"Prob. Ospite ({squadra_ospite}): **{round(100/odd_away, 2)}%**")
+
+    st.markdown("### Quote Over/BTTS (condivise)")
+    q1, q2, q3, q4 = st.columns(4)
+    with q1:
+        _shared_number_input("Quota Over 1.5", "ov15", _k("shared:q_ov15"))
+    with q2:
+        _shared_number_input("Quota Over 2.5", "ov25", _k("shared:q_ov25"))
+    with q3:
+        _shared_number_input("Quota Over 3.5", "ov35", _k("shared:q_ov35"))
+    with q4:
+        _shared_number_input("Quota BTTS",     "btts", _k("shared:q_btts"))
 
     label = _label_from_odds(float(odd_home), float(odd_away))
     label_t = _label_type(label)
@@ -741,16 +752,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         OVER35_COLS = ["cotao3", "Odd Over 3.5", "odd over 3,5", "Over 3.5"]
         BTTS_YES_COLS = ["gg", "GG", "odd goal", "BTTS Yes", "Odd BTTS Yes"]
 
-        # 🔗 Quote condivise
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            q_ov15 = _shared_number_input("📥 Quota Over 1.5 (fallback)", "ov15", _k("roi:q_ov15"))
-        with c2:
-            q_ov25 = _shared_number_input("📥 Quota Over 2.5 (fallback)", "ov25", _k("roi:q_ov25"))
-        with c3:
-            q_ov35 = _shared_number_input("📥 Quota Over 3.5 (fallback)", "ov35", _k("roi:q_ov35"))
-        with c4:
-            q_btts = _shared_number_input("📥 Quota BTTS (fallback)",    "btts", _k("roi:q_btts"))
+        # ➜ Usa le quote condivise inserite sopra
+        shared = _get_shared_quotes()
+        q_ov15, q_ov25, q_ov35, q_btts = shared["ov15"], shared["ov25"], shared["ov35"], shared["btts"]
 
         def _roi_table_for(df_scope: pd.DataFrame, title: str) -> pd.DataFrame:
             table_data = [
@@ -822,16 +826,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             df_h2h = df_h2h[df_h2h["Label"] == label]
         df_h2h = _limit_last_n(df_h2h.dropna(subset=["Home Goal FT", "Away Goal FT"]), last_n)
 
-        # 🔗 Quote condivise
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            quota_ov15 = _shared_number_input("Quota Over 1.5", "ov15", _k("ev:q_ov15"))
-        with c2:
-            quota_ov25 = _shared_number_input("Quota Over 2.5", "ov25", _k("ev:q_ov25"))
-        with c3:
-            quota_ov35 = _shared_number_input("Quota Over 3.5", "ov35", _k("ev:q_ov35"))
-        with c4:
-            quota_btts = _shared_number_input("Quota BTTS",     "btts", _k("ev:q_btts"))
+        # ➜ Usa quote condivise definite sopra
+        shared = _get_shared_quotes()
+        quota_ov15, quota_ov25, quota_ov35, quota_btts = shared["ov15"], shared["ov25"], shared["ov35"], shared["btts"]
 
         df_ev_squadre, best = _build_ev_table(
             df_home_ctx, df_away_ctx, df_h2h,
