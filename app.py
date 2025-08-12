@@ -1,47 +1,54 @@
 # app.py
 from __future__ import annotations
 
+import os
+import sys
+import importlib
+from importlib.machinery import SourceFileLoader
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-# --- Import progetto (robusti/optional) ---
+# -------------------------------------------------------------------
+# Import robusto di utils.py (evita conflitti con pacchetti "utils")
+# -------------------------------------------------------------------
+UTILS_PATH = os.path.join(os.path.dirname(__file__), "utils.py")
 try:
-    from supabase import create_client
-except Exception:
-    create_client = None
+    _utils = SourceFileLoader("app_utils", UTILS_PATH).load_module()
+except Exception as e:
+    st.error(f"Errore nell'import di utils.py: {type(e).__name__} - {e}")
+    st.stop()
 
-from utils import (
-    SUPABASE_URL,
-    SUPABASE_KEY,
-    load_data_from_supabase,
-    load_data_from_file,
-    label_match,
-)
+# ora prendo i simboli che mi servono
+SUPABASE_URL = getattr(_utils, "SUPABASE_URL", "")
+SUPABASE_KEY = getattr(_utils, "SUPABASE_KEY", "")
+load_data_from_supabase = getattr(_utils, "load_data_from_supabase")
+load_data_from_file = getattr(_utils, "load_data_from_file")
+label_match = getattr(_utils, "label_match")
 
+# -------------------------------------------------------------------
 # Moduli di sezione (presenti nel repo)
+# -------------------------------------------------------------------
 from macros import run_macro_stats
 from squadre import run_team_stats
 from pre_match import run_pre_match
 from correct_score_ev_sezione import run_correct_score_ev
-from analisi_live_minuto import run_live_minute_analysis
+from analisi_live_minuto import run_live_minuto_analysis
 from partite_del_giorno import run_partite_del_giorno
 from reverse_engineering import run_reverse_engineering
 
 # Moduli opzionali: se mancano non blocchiamo l’app
 try:
-    from api_football_utils import get_fixtures_today_for_countries  # noqa: F401
+    from supabase import create_client  # noqa: F401
 except Exception:
-    pass
-try:
-    from ai_inference import run_ai_inference  # noqa: F401
-except Exception:
-    pass
-try:
-    from mappa_leghe_supabase import run_mappa_leghe_supabase  # noqa: F401
-except Exception:
-    pass
+    create_client = None
 
+for _opt in ("api_football_utils", "ai_inference", "mappa_leghe_supabase"):
+    try:
+        importlib.import_module(_opt)
+    except Exception:
+        pass
 
 # -------------------------------------------------------
 # SUPPORTO
@@ -62,13 +69,11 @@ def get_league_mapping() -> dict:
     except Exception:
         return {}
 
-
 def _safe_to_datetime(series: pd.Series) -> pd.Series:
     try:
         return pd.to_datetime(series, errors="coerce")
     except Exception:
         return pd.to_datetime(series.astype(str), errors="coerce")
-
 
 # -------------------------------------------------------
 # CONFIGURAZIONE PAGINA
@@ -99,7 +104,6 @@ menu_option = st.sidebar.radio(
 origine_dati = st.sidebar.radio("Seleziona origine dati:", ["Supabase", "Upload Manuale"], key="origine_dati")
 
 if origine_dati == "Supabase":
-    # key personalizzata per evitare conflitti con altri selectbox
     df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase")
 else:
     df, db_selected = load_data_from_file()
@@ -117,7 +121,6 @@ if "campionato_corrente" not in st.session_state:
     st.session_state["campionato_corrente"] = db_selected
 else:
     if st.session_state["campionato_corrente"] != db_selected:
-        # reset selezioni squadra quando cambi campionato
         st.session_state["squadra_casa"] = ""
         st.session_state["squadra_ospite"] = ""
         st.session_state["campionato_corrente"] = db_selected
@@ -290,7 +293,7 @@ elif menu_option == "Correct Score EV":
     run_correct_score_ev(df, db_selected)
 
 elif menu_option == "Analisi Live da Minuto":
-    run_live_minute_analysis(df)
+    run_live_minuto_analysis(df)
 
 elif menu_option == "Partite del Giorno":
     run_partite_del_giorno(df, db_selected)
