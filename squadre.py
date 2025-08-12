@@ -285,6 +285,184 @@ def _render_setup_and_body(
 
     st.divider()
 
+# ======== COMPACT MATCH BOARD (griglia in stile screenshot) ========
+def _pct(x: float, y: float) -> float:
+    return round((x / y) * 100, 2) if y else 0.0
+
+def _cell_bar(pct: float, color: str = "#16a34a") -> str:
+    width = max(0, min(100, float(pct)))
+    return f"""
+    <div style="display:flex;flex-direction:column;gap:4px;align-items:center;">
+      <div style="height:12px;width:100%;background:#e5e7eb;border-radius:6px;overflow:hidden;">
+        <div style="height:12px;width:{width}%;background:{color};"></div>
+      </div>
+      <div style="font-size:11px">{pct:.0f}%</div>
+    </div>"""
+
+def _cell_dual_bar(gf: float, ga: float) -> str:
+    tot = max(gf + ga, 0.0001)
+    w_g = (gf / tot) * 100.0
+    w_a = (ga / tot) * 100.0
+    return f"""
+    <div style="display:flex;flex-direction:column;gap:4px;align-items:center;">
+      <div style="height:12px;width:100%;background:#e5e7eb;border-radius:6px;overflow:hidden;display:flex">
+        <div style="height:12px;width:{w_g:.1f}%;background:#16a34a;"></div>
+        <div style="height:12px;width:{w_a:.1f}%;background:#dc2626;"></div>
+      </div>
+      <div style="font-size:11px">GF {gf:.2f} · GA {ga:.2f}</div>
+    </div>"""
+
+def _compute_board_kpis(df_ctx: pd.DataFrame, venue: str) -> dict:
+    """
+    df_ctx: partite della squadra già nel contesto giusto:
+            Home@Casa oppure Away@Trasferta
+    """
+    if df_ctx.empty:
+        return dict(P=0, Z0=0, O15=0, O25=0, O35=0, GF=0.0, GA=0.0,
+                    BTTS=0, FH1=0, FH2=0, SH1=0, SH2=0)
+
+    df = df_ctx.copy()
+    # ft
+    h = pd.to_numeric(df["Home Goal FT"], errors="coerce").fillna(0).astype(int)
+    a = pd.to_numeric(df["Away Goal FT"], errors="coerce").fillna(0).astype(int)
+    tot = (h + a).astype(int)
+
+    # 1° tempo (se disponibile)
+    if "Home Goal 1T" in df.columns and "Away Goal 1T" in df.columns:
+        h1 = pd.to_numeric(df["Home Goal 1T"], errors="coerce").fillna(0).astype(int)
+        a1 = pd.to_numeric(df["Away Goal 1T"], errors="coerce").fillna(0).astype(int)
+    else:
+        h1 = pd.Series([0]*len(df), index=df.index)
+        a1 = pd.Series([0]*len(df), index=df.index)
+    # 2° tempo = FT - 1T
+    h2 = (h - h1).clip(lower=0)
+    a2 = (a - a1).clip(lower=0)
+
+    # metriche base
+    P   = int(len(df))
+    Z0  = _pct(((h == 0) & (a == 0)).sum(), P)
+    O15 = _pct((tot > 1).sum(), P)
+    O25 = _pct((tot > 2).sum(), P)
+    O35 = _pct((tot > 3).sum(), P)
+    BT  = _pct(((h > 0) & (a > 0)).sum(), P)
+
+    # GF/GA medi nel contesto giusto
+    if venue == "Home":
+        GF = float(h.mean())
+        GA = float(a.mean())
+    else:
+        GF = float(a.mean())
+        GA = float(h.mean())
+
+    # 1+ e 2+ per tempi
+    FH1 = _pct(((h1 + a1) >= 1).sum(), P)
+    FH2 = _pct(((h1 + a1) >= 2).sum(), P)
+    SH1 = _pct(((h2 + a2) >= 1).sum(), P)
+    SH2 = _pct(((h2 + a2) >= 2).sum(), P)
+
+    return dict(P=P, Z0=Z0, O15=O15, O25=O25, O35=O35,
+                GF=GF, GA=GA, BTTS=BT, FH1=FH1, FH2=FH2, SH1=SH1, SH2=SH2)
+
+def _render_board_row(team: str, venue_label: str, k: dict, row_color: str) -> str:
+    return f"""
+      <div class="gb cell team" style="background:{row_color}">{team} <span style="opacity:.7;font-weight:400">({venue_label})</span></div>
+      <div class="gb cell">{k['P']}</div>
+      <div class="gb cell">{_cell_bar(k['Z0'], '#9ca3af')}</div>
+      <div class="gb cell">{_cell_bar(k['O15'], '#16a34a')}</div>
+      <div class="gb cell">{_cell_bar(k['O25'], '#65a30d')}</div>
+      <div class="gb cell">{_cell_bar(k['O35'], '#84cc16')}</div>
+      <div class="gb cell">{_cell_dual_bar(k['GF'], k['GA'])}</div>
+      <div class="gb cell">{_cell_bar(k['BTTS'], '#10b981')}</div>
+      <div class="gb cell">{_cell_bar(k['FH1'], '#0ea5e9')}</div>
+      <div class="gb cell">{_cell_bar(k['FH2'], '#0284c7')}</div>
+      <div class="gb cell">{_cell_bar(k['SH1'], '#a855f7')}</div>
+      <div class="gb cell">{_cell_bar(k['SH2'], '#7c3aed')}</div>
+    """
+
+def render_compact_match_board(df: pd.DataFrame, league_code: str, squadra_casa: str, squadra_ospite: str):
+    """
+    Mostra la griglia compatta stile screenshot per le due squadre selezionate.
+    Usa il df già filtrato per le stagioni (in questa sezione lo fai manualmente).
+    """
+    if not all(col in df.columns for col in ["Home", "Away", "Home Goal FT", "Away Goal FT"]):
+        st.info("Colonne minime non disponibili per la match board.")
+        return
+
+    theme_css = """
+    <style>
+      .board { border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;margin-top:.5rem }
+      .board .hdr { background:#e8f0fe;padding:8px 12px;font-weight:600;display:flex;gap:8px;align-items:center; }
+      .grid { display:grid;grid-template-columns: 220px 70px repeat(10, 1fr);gap:8px;padding:12px;background:white }
+      .grid .cell { background:#f8fafc;border:1px solid #eef2f7;border-radius:8px;padding:6px;display:flex;align-items:center;justify-content:center;min-height:48px }
+      .grid .team { justify-content:flex-start;padding-left:10px;font-weight:600 }
+      .grid .head { font-size:12px;font-weight:600;background:#f1f5f9 }
+      .legend { display:flex;gap:14px;align-items:center;margin-left:auto;font-size:12px }
+      .legend span::before { content:""; display:inline-block; width:10px;height:10px; border-radius:2px; margin-right:6px; vertical-align:middle }
+      .l-ov15::before { background:#16a34a }
+      .l-ov25::before { background:#65a30d }
+      .l-ov35::before { background:#84cc16 }
+      .l-btts::before { background:#10b981 }
+      .l-fh::before   { background:#0ea5e9 }
+      .l-sh::before   { background:#a855f7 }
+    </style>
+    """
+
+    st.markdown(theme_css, unsafe_allow_html=True)
+    st.markdown('<div class="board">', unsafe_allow_html=True)
+
+    st.markdown(
+        f"""
+        <div class="hdr">
+          <div>Match Board – <b>{squadra_casa}</b> vs <b>{squadra_ospite}</b> · <span style="opacity:.7">{league_code}</span></div>
+          <div class="legend">
+            <span class="l-ov15">O1.5</span>
+            <span class="l-ov25">O2.5</span>
+            <span class="l-ov35">O3.5</span>
+            <span class="l-btts">BTTS</span>
+            <span class="l-fh">1° T</span>
+            <span class="l-sh">2° T</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Scope corretti
+    df_home_ctx = df[df["Home"].astype("string") == squadra_casa].copy()
+    if not df_home_ctx.empty:
+        mask_home = df_home_ctx.apply(is_match_played, axis=1)
+        df_home_ctx = df_home_ctx[mask_home]
+    df_away_ctx = df[df["Away"].astype("string") == squadra_ospite].copy()
+    if not df_away_ctx.empty:
+        mask_away = df_away_ctx.apply(is_match_played, axis=1)
+        df_away_ctx = df_away_ctx[mask_away]
+
+    k_home = _compute_board_kpis(df_home_ctx, venue="Home")
+    k_away = _compute_board_kpis(df_away_ctx, venue="Away")
+
+    header = """
+      <div class="gb head">Team (context)</div>
+      <div class="gb head">P</div>
+      <div class="gb head">0-0</div>
+      <div class="gb head">O1.5</div>
+      <div class="gb head">O2.5</div>
+      <div class="gb head">O3.5</div>
+      <div class="gb head">Scrd / Concd</div>
+      <div class="gb head">BTTS</div>
+      <div class="gb head">1+ 1st</div>
+      <div class="gb head">2+ 1st</div>
+      <div class="gb head">1+ 2nd</div>
+      <div class="gb head">2+ 2nd</div>
+    """
+
+    row_home = _render_board_row(squadra_casa, "Home", k_home, "#f0fdf4")
+    row_away = _render_board_row(squadra_ospite, "Away", k_away, "#fff7ed")
+
+    st.markdown(f'<div class="grid">{header}{row_home}{row_away}</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+# ======== /COMPACT MATCH BOARD ========
+
+
     # ==========================
     # EV Consigliato per il match (quote condivise)
     # ==========================
