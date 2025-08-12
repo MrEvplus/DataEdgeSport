@@ -480,13 +480,10 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 if preset == "Stagione in corso":
                     seasons_selected = _pick_current_season(seasons_desc)
                 elif preset != "Tutte" and seasons_desc:
-		     try:
-                    	n = int(preset.split()[-1])
-    		     except Exception:
-        		n = 1
-                     seasons_selected = seasons_desc[:n]
-		else:  # "Tutte"
-    		seasons_selected = []
+                    n = int(preset.split()[-1])
+                    seasons_selected = seasons_desc[:n]
+                elif preset == "Tutte":
+                    seasons_selected = []
 
             if seasons_selected:
                 st.caption(f"Stagioni attive: **{', '.join(seasons_selected)}**")
