@@ -6,8 +6,14 @@ import pandas as pd
 import numpy as np
 import altair as alt
 
-from utils import label_match
 from squadre import compute_team_macro_stats
+from utils import label_match
+
+# Proviamo a importare extract_minutes da utils; fallback se non c'è
+try:
+    from utils import extract_minutes as _extract_minutes_util
+except Exception:
+    _extract_minutes_util = None
 
 # ==========================
 # Helper generali
@@ -38,12 +44,6 @@ def _first_present(cols: list[str], columns: pd.Index) -> str | None:
         if c in columns:
             return c
     return None
-
-def _get_val(row: pd.Series, alternatives: list[str], default=np.nan):
-    for c in alternatives:
-        if c in row and pd.notna(row[c]):
-            return row[c]
-    return default
 
 def _label_from_odds(home_odd: float, away_odd: float) -> str:
     return label_match({"Odd home": home_odd, "Odd Away": away_odd})
@@ -78,6 +78,103 @@ def _limit_last_n(df: pd.DataFrame, n: int) -> pd.DataFrame:
     return df
 
 # ==========================
+# Goal minutes parsing & stato al minuto
+# ==========================
+HOME_MIN_COLS = [
+    "minuti goal segnato home", "Minuti Goal Home", "mgolh",
+    "home goal minuti", "minuti goal home"
+]
+AWAY_MIN_COLS = [
+    "minuti goal segnato away", "Minuti Goal Away", "mgola",
+    "away goal minuti", "minuti goal away"
+]
+
+# Colonne enumerate (fallback)
+HOME_ENUM_COLS = [
+    "home 1 goal segnato(min)", "home 2 goal segnato(min)", "home 3 goal segnato(min)",
+    "home 4 goal segnato(min)", "home 5 goal segnato(min)", "home 6 goal segnato(min)",
+    "home 7 goal segnato(min)", "home 8 goal segnato(min)", "home 9 goal segnato(min)",
+    "gh1", "gh2", "gh3", "gh4", "gh5", "gh6", "gh7", "gh8", "gh9"
+]
+AWAY_ENUM_COLS = [
+    "1 goal away (min)", "2 goal away (min)", "3 goal away (min)",
+    "4 goal away (min)", "5 goal away (min)", "6 goal away (min)",
+    "7 goal away (min)", "8 goal away (min)", "9 goal away (min)",
+    "ga1", "ga2", "ga3", "ga4", "ga5", "ga6", "ga7", "ga8", "ga9"
+]
+
+def _extract_minutes(val) -> list[int]:
+    """Parsa una lista di minuti da stringhe tipo '12;45;78'. Usa utils.extract_minutes se disponibile."""
+    if _extract_minutes_util is not None:
+        try:
+            return _extract_minutes_util(val)  # gestisce sia Serie che stringhe
+        except Exception:
+            pass
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return []
+    minutes = []
+    for part in str(val).replace(",", ";").replace("|", ";").split(";"):
+        p = part.strip()
+        if p.isdigit():
+            minutes.append(int(p))
+    return minutes
+
+def _row_goal_minutes(row, side: str) -> list[int]:
+    """Ritorna la lista dei minuti goal per 'home' o 'away' cercando in varie colonne."""
+    cols = HOME_MIN_COLS if side == "home" else AWAY_MIN_COLS
+    enum_cols = HOME_ENUM_COLS if side == "home" else AWAY_ENUM_COLS
+
+    # 1) colonne aggregate tipo 'minuti goal segnato home'
+    for c in cols:
+        if c in row and pd.notna(row[c]) and str(row[c]).strip() != "":
+            lst = _extract_minutes(row[c])
+            if lst:
+                return sorted(lst)
+
+    # 2) colonne enumerate (gh1, ga1, etc.)
+    lst = []
+    for c in enum_cols:
+        if c in row and pd.notna(row[c]) and str(row[c]).strip() != "":
+            try:
+                v = int(float(str(row[c]).strip()))
+                if v > 0:
+                    lst.append(v)
+            except Exception:
+                continue
+    if lst:
+        return sorted(lst)
+
+    # 3) fallback: se non abbiamo minuti, ritorna lista vuota
+    return []
+
+def _goals_until_minute(row, minute: int) -> tuple[int, int]:
+    """Numero di gol segnati ENTRO (<=) quel minuto da Home/Away."""
+    h_list = _row_goal_minutes(row, "home")
+    a_list = _row_goal_minutes(row, "away")
+    # Se non abbiamo minuti e siamo oltre 90', possiamo approssimare coi FT (serve per completeness)
+    if not h_list and not a_list and minute >= 90:
+        try:
+            return int(row.get("Home Goal FT", 0)), int(row.get("Away Goal FT", 0))
+        except Exception:
+            return 0, 0
+    h = sum(1 for m in h_list if m <= minute)
+    a = sum(1 for m in a_list if m <= minute)
+    return h, a
+
+def _filter_by_state(df: pd.DataFrame, minute: int, h_cur: int, a_cur: int) -> pd.DataFrame:
+    """Filtra le partite che al minuto indicato avevano esattamente quel punteggio."""
+    if df.empty:
+        return df
+    rows = []
+    for _, row in df.iterrows():
+        hh, aa = _goals_until_minute(row, minute)
+        if hh == h_cur and aa == a_cur:
+            rows.append(row)
+    if not rows:
+        return df.iloc[0:0]
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+# ==========================
 # League data by Label
 # ==========================
 def _league_data_by_label(df: pd.DataFrame, label: str) -> dict | None:
@@ -107,15 +204,11 @@ def _league_data_by_label(df: pd.DataFrame, label: str) -> dict | None:
 # Back/Lay 1X2 su dataset
 # ==========================
 def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
-    """
-    Calcola profitti e ROI% per BACK e LAY (liability fissa=1) su HOME/DRAW/AWAY.
-    commission: usata solo per BACK (se si vuole simularla), 0 di default.
-    """
+    """Profitti e ROI% per BACK e LAY (liability=1) su HOME/DRAW/AWAY."""
     if df.empty:
         zero = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
         return zero, zero, zero, zero, 0
 
-    # Quote come float
     for c in ("Odd home", "Odd Draw", "Odd Away"):
         if c in df.columns:
             df[c] = _coerce_float(df[c])
@@ -133,7 +226,6 @@ def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
             "DRAW": float(row.get("Odd Draw", np.nan)),
             "AWAY": float(row.get("Odd Away", np.nan)),
         }
-        # sanitize
         for k, v in prices.items():
             if not (v and v > 1.0 and np.isfinite(v)):
                 prices[k] = 2.0  # default
@@ -145,7 +237,7 @@ def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
                 profits_back[outcome] += (p - 1) * (1 - commission)
             else:
                 profits_back[outcome] -= 1
-            # LAY liability=1
+            # LAY (liability=1)
             stake = 1.0 / (p - 1.0)
             if result != outcome:
                 profits_lay[outcome] += stake
@@ -234,7 +326,7 @@ def _calc_market_roi(df: pd.DataFrame, market: str, price_cols: list[str],
     }
 
 # ==========================
-# Probabilità storiche per mercati (usate anche per EV)
+# Probabilità storiche (campionato/label) per EV
 # ==========================
 def _market_prob(df: pd.DataFrame, market: str, line: float | None) -> float:
     """Ritorna la probabilità (0-100) che il mercato si verifichi su df."""
@@ -245,6 +337,30 @@ def _market_prob(df: pd.DataFrame, market: str, line: float | None) -> float:
     if market == "BTTS":
         ok = ((df["Home Goal FT"] > 0) & (df["Away Goal FT"] > 0)).mean()
     else:
+        ok = (goals > float(line)).mean() if line is not None else 0.0
+    return round(float(ok) * 100, 2)
+
+# ==========================
+# Probabilità condizionate al minuto/punteggio (NUOVO)
+# ==========================
+def _market_prob_conditional(df: pd.DataFrame, market: str, line: float | None,
+                             minute: int, h_cur: int, a_cur: int) -> float:
+    """
+    Probabilità (0-100) che il mercato si verifichi a FT, condizionata
+    allo stato (minuto, punteggio live) usando lo storico.
+    """
+    if df.empty:
+        return 0.0
+    # Filtra match con stato identico al minuto
+    df_state = _filter_by_state(df, minute, h_cur, a_cur)
+    if df_state.empty:
+        return 0.0
+    # Valuta outcome a FT
+    if market == "BTTS":
+        ok = ((df_state["Home Goal FT"] > 0) & (df_state["Away Goal FT"] > 0)).mean()
+    else:
+        goals = pd.to_numeric(df_state["Home Goal FT"], errors="coerce").fillna(0) + \
+                pd.to_numeric(df_state["Away Goal FT"], errors="coerce").fillna(0)
         ok = (goals > float(line)).mean() if line is not None else 0.0
     return round(float(ok) * 100, 2)
 
@@ -480,7 +596,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     st.dataframe(df_ev, use_container_width=True)
 
     # ==========================
-    # 🧠 EV Storico – Squadre selezionate (NUOVA SEZIONE)
+    # 🧠 EV Storico – Squadre selezionate
     # ==========================
     st.markdown("---")
     st.markdown("## 🧠 EV Storico – Squadre selezionate")
@@ -496,15 +612,12 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         df_home_ctx = df_home_ctx[df_home_ctx["Label"] == label]
         df_away_ctx = df_away_ctx[df_away_ctx["Label"] == label]
 
-    # rimuovi righe senza punteggio
     df_home_ctx = df_home_ctx.dropna(subset=["Home Goal FT", "Away Goal FT"])
     df_away_ctx = df_away_ctx.dropna(subset=["Home Goal FT", "Away Goal FT"])
 
-    # ultimi N (se Data presente)
     df_home_ctx = _limit_last_n(df_home_ctx, last_n)
     df_away_ctx = _limit_last_n(df_away_ctx, last_n)
 
-    # Blended e Head-to-Head
     df_blend = pd.concat([df_home_ctx, df_away_ctx], ignore_index=True)
     df_h2h = df[
         ((df["Home"] == squadra_casa) & (df["Away"] == squadra_ospite)) |
@@ -515,7 +628,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     df_h2h = df_h2h.dropna(subset=["Home Goal FT", "Away Goal FT"])
     df_h2h = _limit_last_n(df_h2h, last_n)
 
-    # Quote live per EV
+    # Quote live per EV (usate sia per storico generale sia per condizionale)
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         quota_ov15 = st.number_input("Quota Live Over 1.5", min_value=1.01, step=0.01, value=2.00, key=_k("ev_ov15"))
@@ -533,6 +646,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         ("BTTS", None, quota_btts),
     ]
 
+    # === EV storico “semplice” (non condizionato al minuto)
     rows_ev = []
     prob_chart_rows = []
     for name, line, q in markets:
@@ -570,11 +684,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         ]:
             prob_chart_rows.append({"Mercato": name, "Scope": label_scope, "Prob %": prob})
 
-    df_ev_squadre = pd.DataFrame(rows_ev)
     st.subheader("📋 EV storico per mercati (squadre selezionate)")
-    st.dataframe(df_ev_squadre, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows_ev), use_container_width=True)
 
-    # Grafico probabilità
     st.subheader("📊 Probabilità storiche per mercato e scope")
     df_prob = pd.DataFrame(prob_chart_rows)
     if not df_prob.empty:
@@ -590,7 +702,80 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.info("Nessun dato sufficiente per il grafico delle probabilità.")
 
     # ==========================
-    # EV manuale (campionato/label) – riepilogo semplice
+    # ⚡️ EV Live condizionato al minuto & punteggio (NUOVO)
+    # ==========================
+    st.markdown("---")
+    st.markdown("## ⚡️ EV Live condizionato al minuto & punteggio")
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        minute = st.slider("Minuto attuale di gioco", 0, 120, 60, key=_k("minute_live"))
+    with c2:
+        h_cur = st.number_input("Gol Home (live)", min_value=0, step=1, value=0, key=_k("h_cur"))
+    with c3:
+        a_cur = st.number_input("Gol Away (live)", min_value=0, step=1, value=0, key=_k("a_cur"))
+
+    # Filtra i dataset sulle partite che al minuto avevano quel punteggio
+    df_home_m = _filter_by_state(df_home_ctx, minute, h_cur, a_cur)
+    df_away_m = _filter_by_state(df_away_ctx, minute, h_cur, a_cur)
+    df_blend_m = _filter_by_state(df_blend, minute, h_cur, a_cur)
+    df_h2h_m = _filter_by_state(df_h2h, minute, h_cur, a_cur)
+
+    rows_live = []
+    prob_live_rows = []
+    for name, line, q in markets:
+        p_home_m = _market_prob_conditional(df_home_ctx, name, line, minute, h_cur, a_cur)
+        p_away_m = _market_prob_conditional(df_away_ctx, name, line, minute, h_cur, a_cur)
+        p_blnd_m = _market_prob_conditional(df_blend,    name, line, minute, h_cur, a_cur)
+        p_h2h_m  = _market_prob_conditional(df_h2h,      name, line, minute, h_cur, a_cur)
+
+        ev_home_m = round(q * (p_home_m / 100) - 1, 2)
+        ev_away_m = round(q * (p_away_m / 100) - 1, 2)
+        ev_blnd_m = round(q * (p_blnd_m / 100) - 1, 2)
+        ev_h2h_m  = round(q * (p_h2h_m / 100) - 1, 2)
+
+        rows_live.append({
+            "Mercato": name,
+            "Quota Live": q,
+            f"{squadra_casa} @Casa % (m{minute} {h_cur}-{a_cur})": p_home_m,
+            f"EV {squadra_casa} Live": ev_home_m,
+            f"{squadra_ospite} @Trasferta % (m{minute} {h_cur}-{a_cur})": p_away_m,
+            f"EV {squadra_ospite} Live": ev_away_m,
+            "Blended % Live": p_blnd_m,
+            "EV Blended Live": ev_blnd_m,
+            "Head-to-Head % Live": p_h2h_m,
+            "EV H2H Live": ev_h2h_m,
+            "Match H (state)": len(df_home_m),
+            "Match A (state)": len(df_away_m),
+            "Match H2H (state)": len(df_h2h_m),
+        })
+
+        for label_scope, prob in [
+            (f"{squadra_casa} @Casa (m{minute})", p_home_m),
+            (f"{squadra_ospite} @Trasferta (m{minute})", p_away_m),
+            ("Blended (m{})".format(minute), p_blnd_m),
+            ("Head-to-Head (m{})".format(minute), p_h2h_m),
+        ]:
+            prob_live_rows.append({"Mercato": name, "Scope": label_scope, "Prob %": prob})
+
+    st.subheader("📋 EV Live (condizionato a minuto & punteggio)")
+    st.dataframe(pd.DataFrame(rows_live), use_container_width=True)
+
+    st.subheader("📊 Probabilità condizionate (minuto/punteggio)")
+    df_prob_live = pd.DataFrame(prob_live_rows)
+    if not df_prob_live.empty:
+        chart_live = alt.Chart(df_prob_live).mark_bar().encode(
+            x=alt.X("Mercato:N"),
+            y=alt.Y("Prob %:Q"),
+            color=alt.Color("Scope:N"),
+            column=alt.Column("Scope:N", header=alt.Header(title="")),
+            tooltip=["Mercato", "Scope", alt.Tooltip("Prob %:Q", format=".1f")]
+        ).properties(height=300)
+        st.altair_chart(chart_live, use_container_width=True)
+    else:
+        st.info("Nessun match storico con lo stesso stato (minuto/punteggio). Prova a cambiare parametri o togliere il filtro Label.")
+
+    # ==========================
+    # EV Manuale (campionato/label) – riepilogo
     # ==========================
     st.markdown("---")
     st.markdown("## 📌 EV Manuale (campionato/label) – riferimento rapido")
