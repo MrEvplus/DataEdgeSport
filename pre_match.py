@@ -9,7 +9,7 @@ import altair as alt
 
 from squadre import compute_team_macro_stats, render_team_stats_tab
 from utils import label_match
-
+from correct_score import run_correct_score_panel
 
 # ==========================
 # Altair Theme (globale)
@@ -896,4 +896,13 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         q=st.session_state.get(_k("search_team"), "") or "",
         qh=odd_home, qd=odd_draw, qa=odd_away,
         ov15=shared["ov15"], ov25=shared["ov25"], ov35=shared["ov35"], btts=shared["btts"],
+    )
+
+with tab_correct_score:
+    run_correct_score_panel(
+        df=df_league_all,                 # stesso df che usi nelle altre sezioni
+        league_code=league,               # es. db_selected upper
+        home_team=squadra_casa,
+        away_team=squadra_ospite,
+        seasons=seasons_selected or None  # se vuoi filtrare come la pagina
     )
