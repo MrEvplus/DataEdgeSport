@@ -1,182 +1,387 @@
 # squadre.py
 from __future__ import annotations
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import altair as alt
+import re
 from datetime import datetime
 
-# --------------------------------------------------------
-# Helper per colonne Categorical → string + default
-# --------------------------------------------------------
+import altair as alt
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+
+# =========================================================
+# Helpers generali
+# =========================================================
 def _ensure_str_with_unknown(s: pd.Series, default: str = "Unknown") -> pd.Series:
     """Converte la Serie in stringa e rimpiazza NA/vuoti con 'default'.
-    Funziona anche se il dtype è Categorical (evita TypeError su fillna)."""
-    if pd.api.types.is_categorical_dtype(s.dtype):
-        s = s.cat.add_categories([default]).fillna(default)
-        s = s.astype("string")
-    else:
+    Robusto anche con dtype Categorical (evita TypeError su fillna)."""
+    if s is None:
+        return pd.Series(dtype="string")
+    try:
+        if pd.api.types.is_categorical_dtype(s.dtype):
+            s = s.cat.add_categories([default]).fillna(default)
+            s = s.astype("string")
+        else:
+            s = s.astype("string").fillna(default)
+    except Exception:
         s = s.astype("string").fillna(default)
     return s.replace("", default)
 
-# --------------------------------------------------------
-# ENTRY POINT
-# --------------------------------------------------------
-def run_team_stats(df, db_selected):
-    st.header("📊 Statistiche per Squadre")
 
-    # Normalizza colonne chiave (compatibile con Categorical)
-    if "country" in df.columns:
-        df["country"] = _ensure_str_with_unknown(df["country"], "Unknown").str.strip().str.upper()
-    else:
+def _coerce_num(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce")
+
+
+def _season_sort_key(s: str) -> int:
+    """Estrae l'anno più recente dalla stringa per l'ordinamento desc."""
+    if not isinstance(s, str):
+        s = str(s)
+    yrs = [int(x) for x in re.findall(r"\d{4}", s)]
+    return max(yrs) if yrs else -1
+
+
+def _seasons_desc(unique_seasons: list) -> list[str]:
+    arr = [str(x) for x in unique_seasons if pd.notna(x)]
+    return sorted(arr, key=_season_sort_key, reverse=True)
+
+
+def _limit_last_n(df_in: pd.DataFrame, n: int) -> pd.DataFrame:
+    if n and n > 0 and "Data" in df_in.columns:
+        s = pd.to_datetime(df_in["Data"], errors="coerce")
+        tmp = df_in.copy()
+        tmp["_data_"] = s
+        tmp = tmp.sort_values("_data_", ascending=False).drop(columns=["_data_"])
+        return tmp.head(n)
+    return df_in
+
+
+def _quality_label(n: int) -> str:
+    if n >= 50:
+        return "ALTO"
+    if n >= 20:
+        return "MEDIO"
+    return "BASSO"
+
+
+# =========================================================
+# Entry point "classico" (se vuoi usare la pagina autonoma)
+# =========================================================
+def run_team_stats(df: pd.DataFrame, db_selected: str):
+    """Pagina autonoma (storica). Per l'uso nel tab di Confronto pre-match
+    preferisci `render_team_stats_tab` qui sotto."""
+    st.header("📊 Statistiche per Squadre")
+    _render_setup_and_body(df, db_selected, is_embedded=False)
+
+
+# =========================================================
+# Entry point per TAB su Confronto pre-match
+# =========================================================
+def render_team_stats_tab(
+    df_league_all: pd.DataFrame,
+    league_code: str,
+    squadra_casa: str,
+    squadra_ospite: str,
+):
+    """Render della sezione *Statistiche squadre* da includere dentro
+    Confronto pre-match. Usa un filtro stagioni **indipendente**."""
+    _render_setup_and_body(
+        df=df_league_all,
+        db_selected=league_code,
+        is_embedded=True,
+        squadra_casa=squadra_casa,
+        squadra_ospite=squadra_ospite,
+    )
+
+
+# =========================================================
+# Corpo pagina/tab (con UI e calcoli)
+# =========================================================
+def _render_setup_and_body(
+    df: pd.DataFrame,
+    db_selected: str,
+    is_embedded: bool = False,
+    squadra_casa: str | None = None,
+    squadra_ospite: str | None = None,
+):
+    # --- Normalizzazioni base
+    if "country" not in df.columns:
         st.error("Colonna 'country' mancante.")
         st.stop()
-
-    if "Stagione" not in df.columns:
-        st.error("Colonna 'Stagione' mancante.")
-        st.stop()
-
     if "Home" not in df.columns or "Away" not in df.columns:
         st.error("Colonne 'Home' e/o 'Away' mancanti.")
         st.stop()
 
-    # Uppercase del selezionato per confronto coerente
+    df = df.copy()
+    df["country"] = _ensure_str_with_unknown(df["country"], "Unknown").str.strip().str.upper()
     db_selected = (db_selected or "").strip().upper()
 
     if db_selected not in df["country"].unique():
         st.warning(f"⚠️ Il campionato selezionato '{db_selected}' non è presente nel database.")
         st.stop()
 
-    df_filtered = df[df["country"] == db_selected].copy()
+    df = df[df["country"] == db_selected].copy()
+    df["Home"] = _ensure_str_with_unknown(df["Home"], "")
+    df["Away"] = _ensure_str_with_unknown(df["Away"], "")
 
-    # Stagioni disponibili (robusto a Categorical/NaN)
-    seasons_available = (
-        df_filtered["Stagione"]
-        .astype("string")
-        .dropna()
-        .unique()
-        .tolist()
-    )
-    seasons_available = sorted([s for s in seasons_available if s and s != "nan"], reverse=True)
-
-    if not seasons_available:
-        st.warning(f"⚠️ Nessuna stagione disponibile nel database per il campionato {db_selected}.")
+    # --- Filtro stagioni (indipendente)
+    if "Stagione" not in df.columns:
+        st.error("Colonna 'Stagione' mancante.")
         st.stop()
 
-    st.write(f"Stagioni disponibili nel database: {seasons_available}")
+    seasons_desc = _seasons_desc(df["Stagione"].dropna().unique().tolist())
+    latest = seasons_desc[0] if seasons_desc else None
 
-    seasons_selected = st.multiselect(
-        "Seleziona le stagioni su cui vuoi calcolare le statistiche:",
-        options=seasons_available,
-        default=seasons_available[:1]
+    with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
+        cA, cB = st.columns([2, 1])
+        with cA:
+            seasons_selected = st.multiselect(
+                "Seleziona stagioni (manuale)",
+                options=seasons_desc,
+                default=[latest] if latest else [],
+                key="teams:seasons_manual",
+            )
+        with cB:
+            preset = st.selectbox(
+                "Intervallo rapido",
+                options=["Tutte", "Ultime 10", "Ultime 5", "Ultime 3", "Ultime 2", "Ultime 1"],
+                index=0,
+                key="teams:seasons_preset",
+            )
+            if preset != "Tutte" and seasons_desc:
+                try:
+                    n = int(preset.split()[-1])
+                except Exception:
+                    n = 1
+                seasons_selected = seasons_desc[:n]
+            else:
+                # Tutte
+                seasons_selected = []
+
+        if seasons_selected:
+            st.caption(f"Stagioni attive (sezione Squadre): **{', '.join(seasons_selected)}**")
+            df = df[df["Stagione"].astype("string").isin(seasons_selected)].copy()
+        else:
+            st.caption("Stagioni attive (sezione Squadre): **Tutte**")
+
+    # --- Selettori squadre (se pagina autonoma)
+    if not is_embedded:
+        teams_available = sorted(
+            set(df["Home"].dropna().unique()) | set(df["Away"].dropna().unique())
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            squadra_casa = st.selectbox("Seleziona Squadra Casa", options=teams_available, key="teams:home")
+        with col2:
+            squadra_ospite = st.selectbox("Seleziona Squadra Ospite (facoltativa)", options=[""] + teams_available, key="teams:away")
+    else:
+        # dentro Confronto pre-match: arrivano già impostate
+        if not squadra_casa or not squadra_ospite:
+            st.info("Seleziona **entrambe** le squadre nella parte alta della pagina pre-match.")
+            return
+        if squadra_casa == squadra_ospite:
+            st.warning("Casa e Ospite sono uguali: modifica la selezione.")
+            return
+
+    # ==========================
+    # KPI CARDS (macro)
+    # ==========================
+    st.subheader("📌 KPI Macro (contesto corretto)")
+    st.markdown(
+        "Le metriche sono calcolate su partite **Home@Casa** per la squadra di casa e **Away@Trasferta** per la squadra ospite. "
+        "BTTS% = percentuale di partite con gol di entrambe le squadre."
     )
 
-    if not seasons_selected:
-        st.warning("Seleziona almeno una stagione.")
-        st.stop()
+    stats_home = compute_team_macro_stats(df, squadra_casa, "Home")
+    stats_away = compute_team_macro_stats(df, squadra_ospite, "Away")
 
-    df_filtered = df_filtered[df_filtered["Stagione"].astype("string").isin(seasons_selected)].copy()
-
-    # Lista squadre disponibile (robusta)
-    teams_available = sorted(
-        set(df_filtered["Home"].astype("string").dropna().unique()) |
-        set(df_filtered["Away"].astype("string").dropna().unique())
-    )
-
-    # ✅ INIZIALIZZA SESSION STATE
-    if "squadra_casa" not in st.session_state:
-        st.session_state["squadra_casa"] = teams_available[0] if teams_available else ""
-
-    if "squadra_ospite" not in st.session_state:
-        st.session_state["squadra_ospite"] = ""
-
-    # --------------------------
-    # SELEZIONE SQUADRE
-    # --------------------------
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.selectbox(
-            "Seleziona Squadra 1",
-            options=teams_available,
-            index=teams_available.index(st.session_state["squadra_casa"]) if st.session_state["squadra_casa"] in teams_available and teams_available else 0,
-            key="squadra_casa"
-        )
-
-    with col2:
-        st.selectbox(
-            "Seleziona Squadra 2 (facoltativa - per confronto)",
-            options=[""] + teams_available,
-            index=([""] + teams_available).index(st.session_state["squadra_ospite"]) if st.session_state["squadra_ospite"] in teams_available else 0,
-            key="squadra_ospite"
-        )
-
-    # Debug (opzionale)
-    st.sidebar.write("✅ DEBUG selezione squadre:")
-    st.sidebar.write("squadra_casa =", st.session_state.get("squadra_casa"))
-    st.sidebar.write("squadra_ospite =", st.session_state.get("squadra_ospite"))
-
-    if st.session_state["squadra_casa"]:
-        st.subheader(f"✅ Statistiche Macro per {st.session_state['squadra_casa']}")
-        show_team_macro_stats(df_filtered, st.session_state["squadra_casa"], venue="Home")
-
-    if st.session_state["squadra_ospite"] and st.session_state["squadra_ospite"] != st.session_state["squadra_casa"]:
-        st.subheader(f"✅ Statistiche Macro per {st.session_state['squadra_ospite']}")
-        show_team_macro_stats(df_filtered, st.session_state["squadra_ospite"], venue="Away")
-
-        st.subheader(f"⚔️ Goal Patterns - {st.session_state['squadra_casa']} vs {st.session_state['squadra_ospite']}")
-        show_goal_patterns(df_filtered, st.session_state["squadra_casa"], st.session_state["squadra_ospite"], db_selected, seasons_selected[0])
-
-# --------------------------------------------------------
-# MACRO STATS
-# --------------------------------------------------------
-def show_team_macro_stats(df, team, venue):
-    if venue == "Home":
-        data = df[df["Home"].astype("string") == team]
-        goals_for_col = "Home Goal FT"
-        goals_against_col = "Away Goal FT"
-    else:
-        data = df[df["Away"].astype("string") == team]
-        goals_for_col = "Away Goal FT"
-        goals_against_col = "Home Goal FT"
-
-    data_debug = data.copy()
-    data_debug["played_flag"] = data_debug.apply(is_match_played, axis=1)
-
-    if not data_debug.empty:
-        with st.expander(f"🔎 Mostra tutte le partite filtrate di {team}"):
-            cols = [c for c in [
-                "Home", "Away", "Data", "Orario",
-                "Home Goal FT", "Away Goal FT",
-                "minuti goal segnato home", "minuti goal segnato away",
-                "played_flag"
-            ] if c in data_debug.columns]
-            st.dataframe(data_debug[cols], use_container_width=True)
-    else:
-        st.info(f"⚠️ Nessuna partita trovata per la squadra {team}.")
+    if not stats_home or not stats_away:
+        st.info("⚠️ Una delle due squadre non ha match disponibili nelle stagioni selezionate.")
         return
 
-    excluded = data_debug[data_debug["played_flag"] == False]
-    if len(excluded) > 0:
-        st.warning("⚠️ PARTITE ESCLUSE DAL CONTEGGIO:")
-        cols = [c for c in [
-            "Home", "Away", "Data", "Orario",
-            "Home Goal FT", "Away Goal FT",
-            "minuti goal segnato home", "minuti goal segnato away"
-        ] if c in excluded.columns]
-        st.dataframe(excluded[cols])
+    def _card(value, label, help_txt=""):
+        st.metric(label=label, value=value, help=help_txt)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        _card(stats_home.get("Matches Played", 0), f"{squadra_casa} – Partite")
+    with c2:
+        _card(f"{stats_home.get('Win %', 0):.1f}%", f"{squadra_casa} – Win%")
+    with c3:
+        _card(f"{stats_home.get('Avg Goals Scored', 0):.2f}", f"{squadra_casa} – GF")
+    with c4:
+        _card(f"{stats_home.get('BTTS %', 0):.1f}%", f"{squadra_casa} – BTTS%")
+
+    d1, d2, d3, d4 = st.columns(4)
+    with d1:
+        _card(stats_away.get("Matches Played", 0), f"{squadra_ospite} – Partite")
+    with d2:
+        _card(f"{stats_away.get('Win %', 0):.1f}%", f"{squadra_ospite} – Win%")
+    with d3:
+        _card(f"{stats_away.get('Avg Goals Scored', 0):.2f}", f"{squadra_ospite} – GF")
+    with d4:
+        _card(f"{stats_away.get('BTTS %', 0):.1f}%", f"{squadra_ospite} – BTTS%")
+
+    st.divider()
+
+    # ==========================
+    # Goal Patterns & Fasce Minuto
+    # ==========================
+    st.subheader("🎯 Goal patterns e distribuzione per fasce minuto")
+    st.markdown(
+        "Analisi sequenziale dei gol (primo/ultimo gol, transizioni 1-0→2-0 o 1-1) e distribuzione **Segnati/Subiti** su intervalli: "
+        "`0-15, 16-30, 31-45, 46-60, 61-75, 76-120`."
+    )
+
+    # Casa (match giocati in casa)
+    df_home = df[df["Home"].astype("string") == squadra_casa].copy()
+    if not df_home.empty:
+        mask_played_home = df_home.apply(is_match_played, axis=1)
+        df_home = df_home[mask_played_home]
+    total_home = len(df_home)
+
+    # Ospite (match giocati in trasferta)
+    df_away = df[df["Away"].astype("string") == squadra_ospite].copy()
+    if not df_away.empty:
+        mask_played_away = df_away.apply(is_match_played, axis=1)
+        df_away = df_away[mask_played_away]
+    total_away = len(df_away)
+
+    # Calcoli e visual
+    if total_home > 0:
+        patterns_home, tf_scored_home, tf_conceded_home = compute_goal_patterns(df_home, "Home", total_home)
+        tf_scored_home_pct = _tf_to_pct(tf_scored_home)
+        tf_conceded_home_pct = _tf_to_pct(tf_conceded_home)
     else:
-        st.success("✅ Nessuna partita esclusa dal conteggio.")
+        patterns_home, tf_scored_home, tf_conceded_home = {}, {}, {}
+        tf_scored_home_pct, tf_conceded_home_pct = {}, {}
+
+    if total_away > 0:
+        patterns_away, tf_scored_away, tf_conceded_away = compute_goal_patterns(df_away, "Away", total_away)
+        tf_scored_away_pct = _tf_to_pct(tf_scored_away)
+        tf_conceded_away_pct = _tf_to_pct(tf_conceded_away)
+    else:
+        patterns_away, tf_scored_away, tf_conceded_away = {}, {}, {}
+        tf_scored_away_pct, tf_conceded_away_pct = {}, {}
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"**{squadra_casa} (Home)**")
+        if patterns_home:
+            st.markdown(_build_goal_pattern_html(patterns_home, squadra_casa, "#16a34a"), unsafe_allow_html=True)
+        else:
+            st.info("Dati insufficienti.")
+    with col2:
+        st.markdown(f"**{squadra_ospite} (Away)**")
+        if patterns_away:
+            st.markdown(_build_goal_pattern_html(patterns_away, squadra_ospite, "#dc2626"), unsafe_allow_html=True)
+        else:
+            st.info("Dati insufficienti.")
+    with col3:
+        if patterns_home or patterns_away:
+            total = compute_goal_patterns_total(patterns_home or {}, patterns_away or {}, total_home, total_away)
+            st.markdown("**Totale**")
+            st.markdown(
+                _build_goal_pattern_html(
+                    {k: total.get(k, 0) for k in goal_pattern_keys_without_tf()},
+                    "Totale", "#2563eb"
+                ),
+                unsafe_allow_html=True
+            )
+        else:
+            st.info("—")
+
+    if patterns_home:
+        st.markdown(f"**Distribuzione Goal – {squadra_casa} (Home)**")
+        ch = plot_timeframe_goals(tf_scored_home, tf_conceded_home, tf_scored_home_pct, tf_conceded_home_pct, squadra_casa)
+        st.altair_chart(ch, use_container_width=True)
+    if patterns_away:
+        st.markdown(f"**Distribuzione Goal – {squadra_ospite} (Away)**")
+        ca = plot_timeframe_goals(tf_scored_away, tf_conceded_away, tf_scored_away_pct, tf_conceded_away_pct, squadra_ospite)
+        st.altair_chart(ca, use_container_width=True)
+
+    st.divider()
+
+    # ==========================
+    # EV Consigliato per il match
+    # ==========================
+    st.subheader("🏅 EV consigliato (storico)")
+    st.markdown(
+        "Stima EV per mercati **Over 1.5 / Over 2.5 / Over 3.5 / BTTS** in vari scope:\n"
+        "- **Home@Casa** (partite della squadra di casa giocate in casa),\n"
+        "- **Away@Trasferta** (partite della squadra ospite giocate in trasferta),\n"
+        "- **Blended** (media H@Casa e A@Trasferta),\n"
+        "- **Head-to-Head** (scontri diretti).\n\n"
+        "EV = `quota × prob − 1`. Valuta sempre la **qualità** del campione (BASSO/MEDIO/ALTO)."
+    )
+
+    e1, e2, e3, e4, e5 = st.columns([1, 1, 1, 1, 1])
+    with e1:
+        q15 = st.number_input("Quota Over 1.5", min_value=1.01, step=0.01, value=2.00, key="teams:q15")
+    with e2:
+        q25 = st.number_input("Quota Over 2.5", min_value=1.01, step=0.01, value=2.00, key="teams:q25")
+    with e3:
+        q35 = st.number_input("Quota Over 3.5", min_value=1.01, step=0.01, value=2.00, key="teams:q35")
+    with e4:
+        qgg = st.number_input("Quota BTTS",      min_value=1.01, step=0.01, value=2.00, key="teams:qgg")
+    with e5:
+        last_n = st.slider("Ultimi N match (0=tutti)", min_value=0, max_value=50, value=0, key="teams:lastn")
+
+    # Preparo contesti per EV (con eventuale limitazione ultimi N)
+    df_home_ctx = _limit_last_n(df_home, last_n)
+    df_away_ctx = _limit_last_n(df_away, last_n)
+    df_h2h = df[
+        ((df["Home"] == squadra_casa) & (df["Away"] == squadra_ospite)) |
+        ((df["Home"] == squadra_ospite) & (df["Away"] == squadra_casa))
+    ].copy()
+    df_h2h = _limit_last_n(df_h2h, last_n)
+
+    df_ev, best = _build_ev_table(
+        df_home_ctx, df_away_ctx, df_h2h,
+        squadra_casa, squadra_ospite,
+        q15, q25, q35, qgg
+    )
+
+    # Best EV card
+    if best and best["ev"] > 0:
+        _best_ev_card(best)
+    else:
+        st.info("Nessun EV > 0 con le quote inserite (nei campioni disponibili).")
+
+    # Tabella EV
+    st.dataframe(
+        df_ev,
+        use_container_width=True,
+        height=360,
+        column_config={
+            "Quota": st.column_config.NumberColumn(format="%.2f"),
+            f"{squadra_casa} @Casa %": st.column_config.NumberColumn(format="%.2f"),
+            f"{squadra_ospite} @Trasferta %": st.column_config.NumberColumn(format="%.2f"),
+            "Blended %": st.column_config.NumberColumn(format="%.2f"),
+            "Head-to-Head %": st.column_config.NumberColumn(format="%.2f"),
+            "EV Blended": st.column_config.NumberColumn(format="%.2f"),
+            "EV H2H": st.column_config.NumberColumn(format="%.2f"),
+        },
+    )
+
+
+# =========================================================
+# Macro stats per singola squadra
+# =========================================================
+def compute_team_macro_stats(df: pd.DataFrame, team: str, venue: str) -> dict:
+    if venue == "Home":
+        data = df[df["Home"].astype("string") == team]
+        gf_col, ga_col = "Home Goal FT", "Away Goal FT"
+    else:
+        data = df[df["Away"].astype("string") == team]
+        gf_col, ga_col = "Away Goal FT", "Home Goal FT"
 
     mask_played = data.apply(is_match_played, axis=1)
     data = data[mask_played]
 
-    total_matches = len(data)
-
-    if total_matches == 0:
-        st.info("⚠️ Nessuna partita disputata trovata per la squadra selezionata.")
-        return
+    n = len(data)
+    if n == 0:
+        return {}
 
     if venue == "Home":
         wins = int((data["Home Goal FT"] > data["Away Goal FT"]).sum())
@@ -187,270 +392,189 @@ def show_team_macro_stats(df, team, venue):
         draws = int((data["Away Goal FT"] == data["Home Goal FT"]).sum())
         losses = int((data["Away Goal FT"] < data["Home Goal FT"]).sum())
 
-    goals_for = float(pd.to_numeric(data[goals_for_col], errors="coerce").mean())
-    goals_against = float(pd.to_numeric(data[goals_against_col], errors="coerce").mean())
+    gf = float(_coerce_num(data[gf_col]).mean())
+    ga = float(_coerce_num(data[ga_col]).mean())
+    btts = float(((data["Home Goal FT"] > 0) & (data["Away Goal FT"] > 0)).mean() * 100)
 
-    btts_count = int(((data["Home Goal FT"] > 0) & (data["Away Goal FT"] > 0)).sum())
-    btts = (btts_count / total_matches) * 100 if total_matches > 0 else 0
-
-    stats = {
-        "Venue": venue,
-        "Matches": total_matches,
-        "Win %": round((wins / total_matches) * 100, 2),
-        "Draw %": round((draws / total_matches) * 100, 2),
-        "Loss %": round((losses / total_matches) * 100, 2),
-        "Avg Goals Scored": round(goals_for, 2),
-        "Avg Goals Conceded": round(goals_against, 2),
-        "BTTS %": round(btts, 2)
+    return {
+        "Matches Played": n,
+        "Win %": round((wins / n) * 100, 2),
+        "Draw %": round((draws / n) * 100, 2),
+        "Loss %": round((losses / n) * 100, 2),
+        "Avg Goals Scored": round(gf, 2),
+        "Avg Goals Conceded": round(ga, 2),
+        "BTTS %": round(btts, 2),
     }
 
-    df_stats = pd.DataFrame([stats])
-    st.dataframe(df_stats.set_index("Venue"), use_container_width=True)
 
-# --------------------------------------------------------
-# LOGICA PER MATCH GIOCATO
-# --------------------------------------------------------
-def is_match_played(row):
-    # controlli robusti sui minuti (possono mancare o non essere stringa)
+# =========================================================
+# Match giocato?
+# =========================================================
+def is_match_played(row) -> bool:
+    # minuti goal (possono mancare o non essere stringa)
     m_home = str(row.get("minuti goal segnato home", "") or "").strip()
     m_away = str(row.get("minuti goal segnato away", "") or "").strip()
     if m_home != "" or m_away != "":
         return True
 
-    goals_home = row.get("Home Goal FT", None)
-    goals_away = row.get("Away Goal FT", None)
-    if pd.notna(goals_home) and pd.notna(goals_away):
-        return True
+    # fallback su punteggi finali
+    hg = row.get("Home Goal FT", None)
+    ag = row.get("Away Goal FT", None)
+    return pd.notna(hg) and pd.notna(ag)
 
-    return False
 
-# --------------------------------------------------------
-# TIMELINE
-# --------------------------------------------------------
+# =========================================================
+# Timeline / parse minuti
+# =========================================================
+def parse_goal_times(val):
+    if pd.isna(val) or val == "":
+        return []
+    out = []
+    for part in str(val).strip().split(";"):
+        p = part.strip()
+        if p.isdigit():
+            out.append(int(p))
+    return out
+
+
 def build_timeline(row, venue):
     try:
         h_goals = parse_goal_times(row.get("minuti goal segnato home", ""))
         a_goals = parse_goal_times(row.get("minuti goal segnato away", ""))
 
-        timeline = []
-        for m in h_goals:
-            timeline.append(("H", m))
-        for m in a_goals:
-            timeline.append(("A", m))
+        tl = [("H", m) for m in h_goals] + [("A", m) for m in a_goals]
+        if tl:
+            tl.sort(key=lambda x: x[1])
+            return tl
 
-        if timeline:
-            timeline.sort(key=lambda x: x[1])
-            return timeline
-
-        # timeline vuota → costruisco timeline fake
-        h_ft_raw = row.get("Home Goal FT", 0)
-        a_ft_raw = row.get("Away Goal FT", 0)
-        h_ft = int(h_ft_raw) if pd.notna(h_ft_raw) else 0
-        a_ft = int(a_ft_raw) if pd.notna(a_ft_raw) else 0
-
-        fake_timeline = []
-        for _ in range(h_ft):
-            fake_timeline.append(("H", 90))
-        for _ in range(a_ft):
-            fake_timeline.append(("A", 91))
-        return fake_timeline if fake_timeline else []
-
+        # timeline vuota → costruisco timeline “flat” da FT
+        hg_raw = row.get("Home Goal FT", 0)
+        ag_raw = row.get("Away Goal FT", 0)
+        hg = int(hg_raw) if pd.notna(hg_raw) else 0
+        ag = int(ag_raw) if pd.notna(ag_raw) else 0
+        tl = [("H", 90)] * hg + [("A", 91)] * ag
+        return tl
     except Exception:
         return []
 
-# --------------------------------------------------------
-# PARSE GOAL TIMES
-# --------------------------------------------------------
-def parse_goal_times(val):
-    if pd.isna(val) or val == "":
-        return []
-    times = []
-    for part in str(val).strip().split(";"):
-        p = part.strip()
-        if p.isdigit():
-            times.append(int(p))
-    return times
 
-# --------------------------------------------------------
-# TIMEFRAMES
-# --------------------------------------------------------
+# =========================================================
+# Timeframes
+# =========================================================
 def timeframes():
-    return [
-        (0, 15),
-        (16, 30),
-        (31, 45),
-        (46, 60),
-        (61, 75),
-        (76, 120)
-    ]
+    return [(0, 15), (16, 30), (31, 45), (46, 60), (61, 75), (76, 120)]
 
-# --------------------------------------------------------
-# COMPUTE GOAL PATTERNS
-# --------------------------------------------------------
-def compute_goal_patterns(df_team, venue, total_matches):
+
+# =========================================================
+# Goal pattern computation
+# =========================================================
+def compute_goal_patterns(df_team: pd.DataFrame, venue: str, total_matches: int):
     if total_matches == 0:
         return {key: 0 for key in goal_pattern_keys()}, {}, {}
 
-    def pct(count):
-        return round((count / total_matches) * 100, 2) if total_matches > 0 else 0
-
-    def pct_sub(count, base):
-        return round((count / base) * 100, 2) if base > 0 else 0
+    def pct(x):      return round((x / total_matches) * 100, 2) if total_matches > 0 else 0
+    def pct_sub(x,y):return round((x / y) * 100, 2) if y > 0 else 0
 
     if venue == "Home":
-        wins = int((df_team["Home Goal FT"] > df_team["Away Goal FT"]).sum())
+        wins  = int((df_team["Home Goal FT"] > df_team["Away Goal FT"]).sum())
         draws = int((df_team["Home Goal FT"] == df_team["Away Goal FT"]).sum())
-        losses = int((df_team["Home Goal FT"] < df_team["Away Goal FT"]).sum())
+        losses= int((df_team["Home Goal FT"] < df_team["Away Goal FT"]).sum())
         zero_zero_count = int(((df_team["Home Goal FT"] == 0) & (df_team["Away Goal FT"] == 0)).sum())
     else:
-        wins = int((df_team["Away Goal FT"] > df_team["Home Goal FT"]).sum())
+        wins  = int((df_team["Away Goal FT"] > df_team["Home Goal FT"]).sum())
         draws = int((df_team["Away Goal FT"] == df_team["Home Goal FT"]).sum())
-        losses = int((df_team["Away Goal FT"] < df_team["Home Goal FT"]).sum())
+        losses= int((df_team["Away Goal FT"] < df_team["Home Goal FT"]).sum())
         zero_zero_count = int(((df_team["Away Goal FT"] == 0) & (df_team["Home Goal FT"] == 0)).sum())
 
-    zero_zero_pct = round((zero_zero_count / total_matches) * 100, 2) if total_matches > 0 else 0
+    zero_zero_pct = pct(zero_zero_count)
 
-    tf_scored = {f"{a}-{b}": 0 for a, b in timeframes()}
+    tf_scored   = {f"{a}-{b}": 0 for a, b in timeframes()}
     tf_conceded = {f"{a}-{b}": 0 for a, b in timeframes()}
 
-    first_goal = 0
-    last_goal = 0
-    one_zero = one_one_after_one_zero = 0
-    two_zero_after_one_zero = zero_one = one_one_after_zero_one = zero_two_after_zero_one = 0
+    first_goal = last_goal = 0
+    one_zero = one_one_after_one_zero = two_zero_after_one_zero = 0
+    zero_one = one_one_after_zero_one = zero_two_after_zero_one = 0
 
     for _, row in df_team.iterrows():
-        timeline = build_timeline(row, venue)
-        if not timeline:
+        tl = build_timeline(row, venue)
+        if not tl:
             continue
 
-        # FIRST GOAL
-        first = timeline[0][0] if len(timeline) > 0 else None
+        first = tl[0][0]
+        last  = tl[-1][0]
         if venue == "Home":
-            if first == "H":
-                first_goal += 1
+            if first == "H": first_goal += 1
+            if last  == "H": last_goal  += 1
         else:
-            if first == "A":
-                first_goal += 1
+            if first == "A": first_goal += 1
+            if last  == "A": last_goal  += 1
 
-        # LAST GOAL
-        last = timeline[-1][0] if len(timeline) > 0 else None
-        if venue == "Home":
-            if last == "H":
-                last_goal += 1
-        else:
-            if last == "A":
-                last_goal += 1
-
-        # Calcolo TF goals
-        score_home = 0
-        score_away = 0
-        for team_char, minute in timeline:
-            if team_char == "H":
-                score_home += 1
-            else:
-                score_away += 1
+        score_home = score_away = 0
+        for team_char, minute in tl:
+            if team_char == "H": score_home += 1
+            else:                score_away += 1
 
             for start, end in timeframes():
                 if start < minute <= end:
                     if venue == "Home":
-                        if team_char == "H":
-                            tf_scored[f"{start}-{end}"] += 1
-                        else:
-                            tf_conceded[f"{start}-{end}"] += 1
+                        if team_char == "H": tf_scored[f"{start}-{end}"] += 1
+                        else:                tf_conceded[f"{start}-{end}"] += 1
                     else:
-                        if team_char == "A":
-                            tf_scored[f"{start}-{end}"] += 1
-                        else:
-                            tf_conceded[f"{start}-{end}"] += 1
+                        if team_char == "A": tf_scored[f"{start}-{end}"] += 1
+                        else:                tf_conceded[f"{start}-{end}"] += 1
 
-        # PATTERNS ANALYSIS
+        # transizioni
         if venue == "Home":
             if first == "H":
                 one_zero += 1
-                score_home = 1
-                score_away = 0
-                for team_char, _ in timeline[1:]:
-                    if team_char == "H":
-                        score_home += 1
-                    else:
-                        score_away += 1
-                    if score_home == 2 and score_away == 0:
-                        two_zero_after_one_zero += 1
-                        break
-                    if score_home == 1 and score_away == 1:
-                        one_one_after_one_zero += 1
-                        break
+                sH, sA = 1, 0
+                for ch,_ in tl[1:]:
+                    if ch == "H": sH += 1
+                    else:         sA += 1
+                    if sH == 2 and sA == 0: two_zero_after_one_zero += 1; break
+                    if sH == 1 and sA == 1: one_one_after_one_zero += 1; break
             elif first == "A":
                 zero_one += 1
-                score_home = 0
-                score_away = 1
-                for team_char, _ in timeline[1:]:
-                    if team_char == "H":
-                        score_home += 1
-                    else:
-                        score_away += 1
-                    if score_home == 1 and score_away == 1:
-                        one_one_after_zero_one += 1
-                        break
-                    if score_home == 0 and score_away == 2:
-                        zero_two_after_zero_one += 1
-                        break
-
-        elif venue == "Away":
+                sH, sA = 0, 1
+                for ch,_ in tl[1:]:
+                    if ch == "H": sH += 1
+                    else:         sA += 1
+                    if sH == 1 and sA == 1: one_one_after_zero_one += 1; break
+                    if sH == 0 and sA == 2: zero_two_after_zero_one += 1; break
+        else:
             if first == "H":
                 one_zero += 1
-                score_home = 1
-                score_away = 0
-                for team_char, _ in timeline[1:]:
-                    if team_char == "H":
-                        score_home += 1
-                    else:
-                        score_away += 1
-                    if score_home == 2 and score_away == 0:
-                        two_zero_after_one_zero += 1
-                        break
-                    if score_home == 1 and score_away == 1:
-                        one_one_after_one_zero += 1
-                        break
+                sH, sA = 1, 0
+                for ch,_ in tl[1:]:
+                    if ch == "H": sH += 1
+                    else:         sA += 1
+                    if sH == 2 and sA == 0: two_zero_after_one_zero += 1; break
+                    if sH == 1 and sA == 1: one_one_after_one_zero += 1; break
             elif first == "A":
                 zero_one += 1
-                score_home = 0
-                score_away = 1
-                for team_char, _ in timeline[1:]:
-                    if team_char == "H":
-                        score_home += 1
-                    else:
-                        score_away += 1
-                    if score_home == 1 and score_away == 1:
-                        one_one_after_zero_one += 1
-                        break
-                    if score_home == 0 and score_away == 2:
-                        zero_two_after_zero_one += 1
-                        break
+                sH, sA = 0, 1
+                for ch,_ in tl[1:]:
+                    if ch == "H": sH += 1
+                    else:         sA += 1
+                    if sH == 1 and sA == 1: one_one_after_zero_one += 1; break
+                    if sH == 0 and sA == 2: zero_two_after_zero_one += 1; break
 
-    two_up = int((np.abs(df_team["Home Goal FT"] - df_team["Away Goal FT"]) >= 2).sum())
+    two_up = int((np.abs(_coerce_num(df_team["Home Goal FT"]) - _coerce_num(df_team["Away Goal FT"])) >= 2).sum())
 
-    # H/D/A 1st HALF
-    ht_home_win = int((df_team["Home Goal 1T"] > df_team["Away Goal 1T"]).sum())
-    ht_draw = int((df_team["Home Goal 1T"] == df_team["Away Goal 1T"]).sum())
-    ht_away_win = int((df_team["Home Goal 1T"] < df_team["Away Goal 1T"]).sum())
+    # 1T / 2T
+    ht_home_win = int((_coerce_num(df_team["Home Goal 1T"]) > _coerce_num(df_team["Away Goal 1T"])).sum())
+    ht_draw     = int((_coerce_num(df_team["Home Goal 1T"]) == _coerce_num(df_team["Away Goal 1T"])).sum())
+    ht_away_win = int((_coerce_num(df_team["Home Goal 1T"]) < _coerce_num(df_team["Away Goal 1T"])).sum())
 
-    # H/D/A 2nd HALF
-    sh_home_win = int(((df_team["Home Goal FT"] - df_team["Home Goal 1T"]) >
-                       (df_team["Away Goal FT"] - df_team["Away Goal 1T"])).sum())
-    sh_draw = int(((df_team["Home Goal FT"] - df_team["Home Goal 1T"]) ==
-                   (df_team["Away Goal FT"] - df_team["Away Goal 1T"])).sum())
-    sh_away_win = int(((df_team["Home Goal FT"] - df_team["Home Goal 1T"]) <
-                       (df_team["Away Goal FT"] - df_team["Away Goal 1T"])).sum())
+    sh_home_win = int(((_coerce_num(df_team["Home Goal FT"]) - _coerce_num(df_team["Home Goal 1T"])) >
+                       (_coerce_num(df_team["Away Goal FT"]) - _coerce_num(df_team["Away Goal 1T"]))).sum())
+    sh_draw     = int(((_coerce_num(df_team["Home Goal FT"]) - _coerce_num(df_team["Home Goal 1T"])) ==
+                       (_coerce_num(df_team["Away Goal FT"]) - _coerce_num(df_team["Away Goal 1T"]))).sum())
+    sh_away_win = int(((_coerce_num(df_team["Home Goal FT"]) - _coerce_num(df_team["Home Goal 1T"])) <
+                       (_coerce_num(df_team["Away Goal FT"]) - _coerce_num(df_team["Away Goal 1T"]))).sum())
 
-    tf_scored_pct = {
-        k: round((v / sum(tf_scored.values())) * 100, 2) if sum(tf_scored.values()) > 0 else 0
-        for k, v in tf_scored.items()
-    }
-    tf_conceded_pct = {
-        k: round((v / sum(tf_conceded.values())) * 100, 2) if sum(tf_conceded.values()) > 0 else 0
-        for k, v in tf_conceded.items()
-    }
+    tf_scored_pct   = _tf_to_pct(tf_scored)
+    tf_conceded_pct = _tf_to_pct(tf_conceded)
 
     patterns = {
         "P": total_matches,
@@ -477,232 +601,88 @@ def compute_goal_patterns(df_team, venue, total_matches):
 
     return patterns, tf_scored, tf_conceded
 
-# --------------------------------------------------------
-# BUILD HTML TABLE
-# --------------------------------------------------------
-def build_goal_pattern_html(patterns, team, color):
-    def bar_html(value, color, width_max=80):
-        width = int(width_max * (value / 100)) if isinstance(value, (int, float)) else 0
-        return f"""
-        <div style='display: flex; align-items: center;'>
-            <div style='height: 10px; width: {width}px; background-color: {color}; margin-right: 5px;'></div>
-            <span style='font-size: 12px;'>{value if key=='P' else f"{value:.1f}%"} </span>
-        </div>
-        """
 
-    rows = f"<tr><th>Statistica</th><th>{team}</th></tr>"
-    for key, value in patterns.items():
-        clean_key = key.replace('%', '').strip()
+def _tf_to_pct(tf_dict: dict[str, int]) -> dict[str, float]:
+    tot = sum(tf_dict.values())
+    return {k: round((v / tot) * 100, 2) if tot > 0 else 0 for k, v in tf_dict.items()}
+
+
+# =========================================================
+# HTML goal pattern table
+# =========================================================
+def _build_goal_pattern_html(patterns: dict, team: str, color_hex: str) -> str:
+    def bar_html(value: float, color: str, width_max: int = 90) -> str:
+        width = int(width_max * float(value) / 100.0) if isinstance(value, (int, float)) else 0
+        return (
+            "<div style='display:flex;align-items:center;'>"
+            f"<div style='height:10px;width:{width}px;background:{color};margin-right:6px;border-radius:3px;'></div>"
+            f"<span style='font-size:12px'>{value:.1f}%</span>"
+            "</div>"
+        )
+
+    rows = "<tr><th>Statistica</th><th>Valore</th></tr>"
+    for key, val in patterns.items():
+        label = key.replace("%", "").strip()
         if key == "P":
-            cell = f"{int(value)}"
+            cell = f"<b>{int(val)}</b>"
         else:
-            cell = bar_html(value, color)
-        rows += f"<tr><td>{clean_key}</td><td>{cell}</td></tr>"
+            cell = bar_html(val, color_hex)
+        rows += f"<tr><td>{label}</td><td>{cell}</td></tr>"
 
-    html_table = f"""
-    <table style='border-collapse: collapse; width: 100%; font-size: 12px;'>
-        {rows}
-    </table>
-    """
-    return html_table
+    html = (
+        "<table style='border-collapse:collapse;width:100%;font-size:12px;'>"
+        f"{rows}"
+        "</table>"
+    )
+    return html
 
-# --------------------------------------------------------
-# PLOT TIMEFRAME GOALS
-# --------------------------------------------------------
+
+# =========================================================
+# Grafico fasce minuto
+# =========================================================
 def plot_timeframe_goals(tf_scored, tf_conceded, tf_scored_pct, tf_conceded_pct, team):
-    # build dataframe
     data = []
-    for tf in tf_scored.keys():
-        data.append({
-            "Time Frame": tf,
-            "Type": "Goals Scored",
-            "Percentage": tf_scored_pct.get(tf, 0),
-            "Count": tf_scored.get(tf, 0)
-        })
-        data.append({
-            "Time Frame": tf,
-            "Type": "Goals Conceded",
-            "Percentage": tf_conceded_pct.get(tf, 0),
-            "Count": tf_conceded.get(tf, 0)
-        })
-
+    keys = list(tf_scored.keys())
+    for tf in keys:
+        data.append({"Time Frame": tf, "Tipo": "Segnati", "Perc": tf_scored_pct.get(tf, 0), "Count": tf_scored.get(tf, 0)})
+        data.append({"Time Frame": tf, "Tipo": "Subiti",  "Perc": tf_conceded_pct.get(tf, 0), "Count": tf_conceded.get(tf, 0)})
     df_tf = pd.DataFrame(data)
 
     chart = alt.Chart(df_tf).mark_bar().encode(
-        x=alt.X("Time Frame:N", title="Minute Intervals", sort=list(tf_scored.keys())),
-        y=alt.Y("Percentage:Q", title="Percentage (%)"),
-        color=alt.Color(
-            "Type:N",
-            scale=alt.Scale(
-                domain=["Goals Scored", "Goals Conceded"],
-                range=["green", "red"]
-            )
-        ),
-        xOffset="Type:N",
-        tooltip=["Type", "Time Frame", "Percentage", "Count"]
+        x=alt.X("Time Frame:N", title="Minuti", sort=keys),
+        y=alt.Y("Perc:Q", title="Percentuale (%)"),
+        color=alt.Color("Tipo:N", scale=alt.Scale(domain=["Segnati", "Subiti"], range=["#16a34a", "#dc2626"])),
+        xOffset="Tipo:N",
+        tooltip=["Tipo", "Time Frame", alt.Tooltip("Perc:Q", format=".1f"), "Count"],
     ).properties(
-        width=500,
         height=300,
-        title=f"Goal Time Frame % - {team}"
+        title=f"Distribuzione gol per intervalli – {team}",
     )
 
-    text = alt.Chart(df_tf).mark_text(
-        align='center',
-        baseline='middle',
-        dy=-5,
-        color="black"
-    ).encode(
-        x=alt.X("Time Frame:N", sort=list(tf_scored.keys())),
-        y="Percentage:Q",
-        detail="Type:N",
-        text=alt.Text("Count:Q", format=".0f")
+    text = alt.Chart(df_tf).mark_text(align="center", baseline="middle", dy=-5).encode(
+        x=alt.X("Time Frame:N", sort=keys),
+        y="Perc:Q",
+        detail="Tipo:N",
+        text=alt.Text("Count:Q", format=".0f"),
     )
-
     return chart + text
 
-# --------------------------------------------------------
-# SHOW GOAL PATTERNS
-# --------------------------------------------------------
-def show_goal_patterns(df, team1, team2, country, stagione):
-    # Filtra le partite per le due squadre
-    df_team1_home = df[
-        (df["Home"].astype("string") == team1) &
-        (df["country"] == country) &
-        (df["Stagione"].astype("string") == stagione)
-    ].copy()
-    df_team2_away = df[
-        (df["Away"].astype("string") == team2) &
-        (df["country"] == country) &
-        (df["Stagione"].astype("string") == stagione)
-    ].copy()
 
-    mask_played_home = df_team1_home.apply(is_match_played, axis=1)
-    df_team1_home = df_team1_home[mask_played_home]
-
-    mask_played_away = df_team2_away.apply(is_match_played, axis=1)
-    df_team2_away = df_team2_away[mask_played_away]
-
-    total_home_matches = len(df_team1_home)
-    total_away_matches = len(df_team2_away)
-
-    # Calcola pattern Home
-    patterns_home, tf_scored_home, tf_conceded_home = compute_goal_patterns(
-        df_team1_home, "Home", total_home_matches
-    )
-    tf_scored_home_pct = {
-        k: round((v / sum(tf_scored_home.values())) * 100, 2) if sum(tf_scored_home.values()) > 0 else 0
-        for k, v in tf_scored_home.items()
-    }
-    tf_conceded_home_pct = {
-        k: round((v / sum(tf_conceded_home.values())) * 100, 2) if sum(tf_conceded_home.values()) > 0 else 0
-        for k, v in tf_conceded_home.items()
-    }
-
-    # Calcola pattern Away
-    patterns_away, tf_scored_away, tf_conceded_away = compute_goal_patterns(
-        df_team2_away, "Away", total_away_matches
-    )
-    tf_scored_away_pct = {
-        k: round((v / sum(tf_scored_away.values())) * 100, 2) if sum(tf_scored_away.values()) > 0 else 0
-        for k, v in tf_scored_away.items()
-    }
-    tf_conceded_away_pct = {
-        k: round((v / sum(tf_conceded_away.values())) * 100, 2) if sum(tf_conceded_away.values()) > 0 else 0
-        for k, v in tf_conceded_away.items()
-    }
-
-    patterns_total = compute_goal_patterns_total(
-        patterns_home, patterns_away,
-        total_home_matches, total_away_matches
-    )
-
-    html_home = build_goal_pattern_html(patterns_home, team1, "green")
-    html_away = build_goal_pattern_html(patterns_away, team2, "red")
-    html_total = build_goal_pattern_html(
-        {k: patterns_total.get(k, 0) for k in goal_pattern_keys_without_tf()},
-        "Totale", "blue"
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.markdown(f"### {team1} (Home)")
-        st.markdown(html_home, unsafe_allow_html=True)
-
-    with col2:
-        st.markdown(f"### {team2} (Away)")
-        st.markdown(html_away, unsafe_allow_html=True)
-
-    with col3:
-        st.markdown(f"### Totale")
-        st.markdown(html_total, unsafe_allow_html=True)
-
-    # Grafico Time Frame Goals HOME
-    chart_home = plot_timeframe_goals(
-        tf_scored=tf_scored_home,
-        tf_conceded=tf_conceded_home,
-        tf_scored_pct=tf_scored_home_pct,
-        tf_conceded_pct=tf_conceded_home_pct,
-        team=team1
-    )
-    st.markdown(f"### Distribuzione Goal Time Frame - {team1} (Home)")
-    st.altair_chart(chart_home, use_container_width=True)
-
-    # Grafico Time Frame Goals AWAY
-    chart_away = plot_timeframe_goals(
-        tf_scored=tf_scored_away,
-        tf_conceded=tf_conceded_away,
-        tf_scored_pct=tf_scored_away_pct,
-        tf_conceded_pct=tf_conceded_away_pct,
-        team=team2
-    )
-    st.markdown(f"### Distribuzione Goal Time Frame - {team2} (Away)")
-    st.altair_chart(chart_away, use_container_width=True)
-
-# --------------------------------------------------------
-# COMPUTE GOAL PATTERNS TOTAL
-# --------------------------------------------------------
-def compute_goal_patterns_total(patterns_home, patterns_away, total_home_matches, total_away_matches):
-    total_matches = total_home_matches + total_away_matches
-    total_patterns = {}
-
-    for key in goal_pattern_keys():
-        if key == "P":
-            total_patterns["P"] = total_matches
-        elif key in ["Win %", "Draw %", "Loss %"]:
-            # Media “incrociata” H/A
-            if key == "Win %":
-                val = (patterns_home.get("Win %", 0) + patterns_away.get("Loss %", 0)) / 2
-            elif key == "Draw %":
-                val = (patterns_home.get("Draw %", 0) + patterns_away.get("Draw %", 0)) / 2
-            elif key == "Loss %":
-                val = (patterns_home.get("Loss %", 0) + patterns_away.get("Win %", 0)) / 2
-            total_patterns[key] = round(val, 2)
-        elif key in ["First Goal %", "Last Goal %"]:
-            # non calcoliamo questi valori nel totale
-            continue
-        else:
-            home_val = patterns_home.get(key, 0)
-            away_val = patterns_away.get(key, 0)
-            val = ((home_val * total_home_matches) + (away_val * total_away_matches)) / total_matches if total_matches > 0 else 0
-            total_patterns[key] = round(val, 2)
-
-    return total_patterns
-
-# --------------------------------------------------------
-# GOAL PATTERN KEYS
-# --------------------------------------------------------
+# =========================================================
+# Goal pattern keys
+# =========================================================
 def goal_pattern_keys():
     keys = [
         "P", "Win %", "Draw %", "Loss %", "First Goal %", "Last Goal %",
         "1-0 %", "1-1 after 1-0 %", "2-0 after 1-0 %",
         "0-1 %", "1-1 after 0-1 %", "0-2 after 0-1 %",
         "2+ Goals %", "H 1st %", "D 1st %", "A 1st %",
-        "H 2nd %", "D 2nd %", "A 2nd %", "0-0 %"
+        "H 2nd %", "D 2nd %", "A 2nd %", "0-0 %",
     ]
-    for start, end in timeframes():
-        keys.append(f"{start}-{end} Goals %")
+    for a, b in timeframes():
+        keys.append(f"{a}-{b} Goals %")
     return keys
+
 
 def goal_pattern_keys_without_tf():
     return [
@@ -710,52 +690,209 @@ def goal_pattern_keys_without_tf():
         "1-0 %", "1-1 after 1-0 %", "2-0 after 1-0 %",
         "0-1 %", "1-1 after 0-1 %", "0-2 after 0-1 %",
         "2+ Goals %", "H 1st %", "D 1st %", "A 1st %",
-        "H 2nd %", "D 2nd %", "A 2nd %"
+        "H 2nd %", "D 2nd %", "A 2nd %",
     ]
 
-# --------------------------------------------------------
-# COMPUTE TEAM MACRO STATS (utility)
-# --------------------------------------------------------
-def compute_team_macro_stats(df, team, venue):
-    if venue == "Home":
-        data = df[df["Home"].astype("string") == team]
-        goals_for_col = "Home Goal FT"
-        goals_against_col = "Away Goal FT"
+
+# =========================================================
+# Totale patterns (Home+Away pesati)
+# =========================================================
+def compute_goal_patterns_total(patterns_home, patterns_away, total_home_matches, total_away_matches):
+    total_matches = total_home_matches + total_away_matches
+    total = {}
+    for key in goal_pattern_keys():
+        if key == "P":
+            total["P"] = total_matches
+        elif key in ["Win %", "Draw %", "Loss %"]:
+            if key == "Win %":
+                val = (patterns_home.get("Win %", 0) + patterns_away.get("Loss %", 0)) / 2
+            elif key == "Draw %":
+                val = (patterns_home.get("Draw %", 0) + patterns_away.get("Draw %", 0)) / 2
+            else:
+                val = (patterns_home.get("Loss %", 0) + patterns_away.get("Win %", 0)) / 2
+            total[key] = round(val, 2)
+        elif key in ["First Goal %", "Last Goal %"]:
+            continue
+        else:
+            hv = patterns_home.get(key, 0)
+            av = patterns_away.get(key, 0)
+            val = ((hv * total_home_matches) + (av * total_away_matches)) / total_matches if total_matches > 0 else 0
+            total[key] = round(val, 2)
+    return total
+
+
+# =========================================================
+# EV storico: tabella e best
+# =========================================================
+def _market_prob(df: pd.DataFrame, market: str, line: float | None) -> float:
+    if df.empty:
+        return 0.0
+    hg = _coerce_num(df["Home Goal FT"]).fillna(0)
+    ag = _coerce_num(df["Away Goal FT"]).fillna(0)
+    goals = hg + ag
+    if market == "BTTS":
+        ok = ((hg > 0) & (ag > 0)).mean()
     else:
-        data = df[df["Away"].astype("string") == team]
-        goals_for_col = "Away Goal FT"
-        goals_against_col = "Home Goal FT"
+        ok = (goals > float(line)).mean() if line is not None else 0.0
+    return round(float(ok) * 100, 2)
 
-    mask_played = data.apply(is_match_played, axis=1)
-    data = data[mask_played]
 
-    total_matches = len(data)
-    if total_matches == 0:
-        return {}
+def _build_ev_table(
+    df_home_ctx: pd.DataFrame,
+    df_away_ctx: pd.DataFrame,
+    df_h2h: pd.DataFrame,
+    squadra_casa: str,
+    squadra_ospite: str,
+    q15: float,
+    q25: float,
+    q35: float,
+    qgg: float,
+):
+    markets = [
+        ("Over 1.5", 1.5, q15),
+        ("Over 2.5", 2.5, q25),
+        ("Over 3.5", 3.5, q35),
+        ("BTTS", None, qgg),
+    ]
+    rows = []
+    candidates = []
 
-    if venue == "Home":
-        wins = int((data["Home Goal FT"] > data["Away Goal FT"]).sum())
-        draws = int((data["Home Goal FT"] == data["Away Goal FT"]).sum())
-        losses = int((data["Home Goal FT"] < data["Away Goal FT"]).sum())
-    else:
-        wins = int((data["Away Goal FT"] > data["Home Goal FT"]).sum())
-        draws = int((data["Away Goal FT"] == data["Home Goal FT"]).sum())
-        losses = int((data["Away Goal FT"] < data["Home Goal FT"]).sum())
+    for name, line, q in markets:
+        p_home = _market_prob(df_home_ctx, name, line)
+        p_away = _market_prob(df_away_ctx, name, line)
+        p_blnd = round((p_home + p_away) / 2, 2) if (p_home > 0 or p_away > 0) else 0.0
+        p_h2h  = _market_prob(df_h2h, name, line)
 
-    goals_for = float(pd.to_numeric(data[goals_for_col], errors="coerce").mean())
-    goals_against = float(pd.to_numeric(data[goals_against_col], errors="coerce").mean())
+        ev_home = round(q * (p_home / 100) - 1, 2)
+        ev_away = round(q * (p_away / 100) - 1, 2)
+        ev_blnd = round(q * (p_blnd / 100) - 1, 2)
+        ev_h2h  = round(q * (p_h2h  / 100) - 1, 2)
 
-    btts_count = int(((data["Home Goal FT"] > 0) & (data["Away Goal FT"] > 0)).sum())
-    btts = (btts_count / total_matches) * 100 if total_matches > 0 else 0
+        n_h, n_a, n_h2h = len(df_home_ctx), len(df_away_ctx), len(df_h2h)
+        qual_blnd = _quality_label(n_h + n_a)
+        qual_h2h  = _quality_label(n_h2h)
 
-    stats = {
-        "Matches Played": total_matches,
-        "Win %": round((wins / total_matches) * 100, 2),
-        "Draw %": round((draws / total_matches) * 100, 2),
-        "Loss %": round((losses / total_matches) * 100, 2),
-        "Avg Goals Scored": round(goals_for, 2),
-        "Avg Goals Conceded": round(goals_against, 2),
-        "BTTS %": round(btts, 2)
-    }
-    return stats
+        rows.append({
+            "Mercato": name,
+            "Quota": q,
+            f"{squadra_casa} @Casa %": p_home,
+            f"EV {squadra_casa}": ev_home,
+            f"{squadra_ospite} @Trasferta %": p_away,
+            f"EV {squadra_ospite}": ev_away,
+            "Blended %": p_blnd,
+            "EV Blended": ev_blnd,
+            "Qualità Blended": qual_blnd,
+            "Head-to-Head %": p_h2h,
+            "EV H2H": ev_h2h,
+            "Qualità H2H": qual_h2h,
+            "Match H": n_h,
+            "Match A": n_a,
+            "Match H2H": n_h2h,
+        })
+
+        # Candidati al "Best EV": preferisci Blended (più stabile), poi H2H
+        candidates += [
+            {"scope": "Blended", "mercato": name, "quota": q, "prob": p_blnd, "ev": ev_blnd, "campione": n_h + n_a, "qualita": qual_blnd},
+            {"scope": "Head-to-Head", "mercato": name, "quota": q, "prob": p_h2h, "ev": ev_h2h, "campione": n_h2h, "qualita": qual_h2h},
+        ]
+
+    df_ev = pd.DataFrame(rows)
+
+    best = None
+    # Ordina per EV desc, a parità preferisci Blended
+    for c in sorted(candidates, key=lambda x: (x["ev"], 1 if x["scope"] == "Blended" else 0), reverse=True):
+        if c["ev"] > 0:
+            best = c
+            break
+
+    return df_ev, best
+
+
+def _best_ev_card(best: dict):
+    bg = "#052e16"
+    st.markdown(
+        f"""
+        <div style="border:1px solid #16a34a;border-radius:12px;padding:14px;background:{bg};color:#e5fff0;">
+            <div style="font-size:14px;opacity:.9;">Miglior opportunità (storico)</div>
+            <div style="display:flex;gap:20px;align-items:baseline;flex-wrap:wrap;">
+                <div style="font-size:28px;font-weight:700;">EV {best['ev']:+.2f}</div>
+                <div style="font-size:16px;">Mercato: <b>{best['mercato']}</b></div>
+                <div style="font-size:16px;">Scope: <b>{best['scope']}</b></div>
+                <div style="font-size:16px;">Prob: <b>{best['prob']:.1f}%</b></div>
+                <div style="font-size:16px;">Quota: <b>{best['quota']:.2f}</b></div>
+                <div style="font-size:16px;">Campione: <b>{best['campione']}</b> ({best['qualita']})</div>
+            </div>
+            <div style="font-size:12px;opacity:.8;margin-top:6px;">
+                Nota: EV stimato su storico; verifica sempre la coerenza con il contesto attuale (assenze, forma, motivazioni).
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# =========================================================
+# (Legacy) Se vuoi mantenere funzioni di visualizzazione stand-alone
+# =========================================================
+def show_team_macro_stats(df, team, venue):
+    """Mantengo per compatibilità con codice esistente."""
+    stats = compute_team_macro_stats(df, team, venue)
+    if not stats:
+        st.info(f"⚠️ Nessuna partita utile per {team} ({venue}).")
+        return
+    df_stats = pd.DataFrame([stats]).set_index(pd.Index([venue]))
+    st.dataframe(df_stats, use_container_width=True)
+
+
+def show_goal_patterns(df, team1, team2, country, stagione):
+    """Mantengo per compatibilità: versione singola stagione + lega."""
+    df = df.copy()
+    df = df[(df["country"] == country) & (df["Stagione"].astype("string") == str(stagione))]
+
+    df_team1_home = df[df["Home"].astype("string") == team1]
+    df_team2_away = df[df["Away"].astype("string") == team2]
+
+    mask_played_home = df_team1_home.apply(is_match_played, axis=1)
+    mask_played_away = df_team2_away.apply(is_match_played, axis=1)
+    df_team1_home = df_team1_home[mask_played_home]
+    df_team2_away = df_team2_away[mask_played_away]
+
+    total_home = len(df_team1_home)
+    total_away = len(df_team2_away)
+
+    if total_home == 0 and total_away == 0:
+        st.info("Nessun match utile per calcolare i pattern.")
+        return
+
+    patterns_home, tf_scored_home, tf_conceded_home = compute_goal_patterns(df_team1_home, "Home", total_home) if total_home else ({}, {}, {})
+    patterns_away, tf_scored_away, tf_conceded_away = compute_goal_patterns(df_team2_away, "Away", total_away) if total_away else ({}, {}, {})
+
+    tf_scored_home_pct = _tf_to_pct(tf_scored_home) if tf_scored_home else {}
+    tf_conceded_home_pct = _tf_to_pct(tf_conceded_home) if tf_conceded_home else {}
+    tf_scored_away_pct = _tf_to_pct(tf_scored_away) if tf_scored_away else {}
+    tf_conceded_away_pct = _tf_to_pct(tf_conceded_away) if tf_conceded_away else {}
+
+    patterns_total = compute_goal_patterns_total(patterns_home or {}, patterns_away or {}, total_home, total_away)
+
+    html_home = _build_goal_pattern_html(patterns_home, team1, "#16a34a") if patterns_home else None
+    html_away = _build_goal_pattern_html(patterns_away, team2, "#dc2626") if patterns_away else None
+    html_total = _build_goal_pattern_html({k: patterns_total.get(k, 0) for k in goal_pattern_keys_without_tf()}, "Totale", "#2563eb") if (patterns_home or patterns_away) else None
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"### {team1} (Home)")
+        st.markdown(html_home or "—", unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"### {team2} (Away)")
+        st.markdown(html_away or "—", unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"### Totale")
+        st.markdown(html_total or "—", unsafe_allow_html=True)
+
+    if patterns_home:
+        ch = plot_timeframe_goals(tf_scored_home, tf_conceded_home, tf_scored_home_pct, tf_conceded_home_pct, team1)
+        st.altair_chart(ch, use_container_width=True)
+    if patterns_away:
+        ca = plot_timeframe_goals(tf_scored_away, tf_conceded_away, tf_scored_away_pct, tf_conceded_away_pct, team2)
+        st.altair_chart(ca, use_container_width=True)
 
