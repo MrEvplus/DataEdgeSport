@@ -1,606 +1,514 @@
+# pre_match.py
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
+import numpy as np
+
 from utils import label_match
 from squadre import compute_team_macro_stats
-from macros import run_macro_stats
 
-# --------------------------------------------------------
-# FUNZIONE PER OTTENERE LEAGUE DATA BY LABEL
-# --------------------------------------------------------
-def get_league_data_by_label(df, label):
+# ==========================
+# Helper generali
+# ==========================
+def _k(name: str) -> str:
+    return f"prematch:{name}"
+
+def _ensure_str(s: pd.Series) -> pd.Series:
+    """String robusta anche per dtype Categorical."""
+    if s is None:
+        return pd.Series(dtype="string")
+    try:
+        import pandas as pd  # local ref
+        if pd.api.types.is_categorical_dtype(s.dtype):
+            s = s.astype("string")
+    except Exception:
+        pass
+    return s.astype("string")
+
+def _coerce_float(s: pd.Series) -> pd.Series:
+    """Converte una Serie a float accettando virgole e stringhe."""
+    if s is None:
+        return pd.Series(dtype="float")
+    return pd.to_numeric(
+        _ensure_str(s).str.replace(",", ".", regex=False),
+        errors="coerce"
+    )
+
+def _first_present(cols: list[str], columns: pd.Index) -> str | None:
+    """Ritorna il primo nome colonna presente tra quelli proposti."""
+    for c in cols:
+        if c in columns:
+            return c
+    return None
+
+def _get_val(row: pd.Series, alternatives: list[str], default=np.nan):
+    for c in alternatives:
+        if c in row and pd.notna(row[c]):
+            return row[c]
+    return default
+
+def _label_from_odds(home_odd: float, away_odd: float) -> str:
+    return label_match({"Odd home": home_odd, "Odd Away": away_odd})
+
+def _label_type(label: str | None) -> str:
+    if not label:
+        return "Both"
+    if label.startswith("H_"):
+        return "Home"
+    if label.startswith("A_"):
+        return "Away"
+    return "Both"
+
+def _format_value(val: float | int | None, is_roi: bool = False) -> str:
+    if val is None or pd.isna(val):
+        val = 0.0
+    suffix = "%" if is_roi else ""
+    if val > 0:
+        return f"🟢 +{float(val):.2f}{suffix}"
+    if val < 0:
+        return f"🔴 {float(val):.2f}{suffix}"
+    return f"0.00{suffix}"
+
+# ==========================
+# Dati “league” per label
+# ==========================
+def _league_data_by_label(df: pd.DataFrame, label: str) -> dict | None:
     if "Label" not in df.columns:
         df = df.copy()
         df["Label"] = df.apply(label_match, axis=1)
 
-    df["match_result"] = df.apply(
-        lambda row: "Home Win" if row["Home Goal FT"] > row["Away Goal FT"]
-        else "Away Win" if row["Home Goal FT"] < row["Away Goal FT"]
-        else "Draw",
-        axis=1
-    )
+    # risultato 1X2
+    if "match_result" not in df.columns:
+        df["match_result"] = df.apply(
+            lambda r: "Home Win" if r["Home Goal FT"] > r["Away Goal FT"]
+            else "Away Win" if r["Home Goal FT"] < r["Away Goal FT"]
+            else "Draw",
+            axis=1
+        )
 
-    group_label = df.groupby("Label").agg(
+    group = df.groupby("Label").agg(
         Matches=("Home", "count"),
         HomeWin_pct=("match_result", lambda x: (x == "Home Win").mean() * 100),
         Draw_pct=("match_result", lambda x: (x == "Draw").mean() * 100),
-        AwayWin_pct=("match_result", lambda x: (x == "Away Win").mean() * 100)
+        AwayWin_pct=("match_result", lambda x: (x == "Away Win").mean() * 100),
     ).reset_index()
 
-    row = group_label[group_label["Label"] == label]
-    if not row.empty:
-        return row.iloc[0].to_dict()
-    else:
-        return None
+    row = group[group["Label"] == label]
+    return row.iloc[0].to_dict() if not row.empty else None
 
-# --------------------------------------------------------
-# LABEL FROM ODDS
-# --------------------------------------------------------
-def label_from_odds(home_odd, away_odd):
-    fake_row = {
-        "Odd home": home_odd,
-        "Odd Away": away_odd
-    }
-    return label_match(fake_row)
-
-# --------------------------------------------------------
-# DETERMINA TIPO DI LABEL
-# --------------------------------------------------------
-def get_label_type(label):
-    if label and label.startswith("H_"):
-        return "Home"
-    elif label and label.startswith("A_"):
-        return "Away"
-    else:
-        return "Both"
-
-# --------------------------------------------------------
-# FORMATTING COLORE
-# --------------------------------------------------------
-def format_value(val, is_roi=False):
-    if val is None:
-        val = 0
-    suffix = "%" if is_roi else ""
-    if val > 0:
-        return f"🟢 +{val:.2f}{suffix}"
-    elif val < 0:
-        return f"🔴 {val:.2f}{suffix}"
-    else:
-        return f"0.00{suffix}"
-
-# --------------------------------------------------------
-# CALCOLO BACK / LAY STATS (versione corretta)
-# --------------------------------------------------------
-def calculate_back_lay(filtered_df):
+# ==========================
+# Back/Lay 1X2 su dataset
+# ==========================
+def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
     """
-    Calcola:
-    - profitti back e lay
-    - ROI% back e lay
-    per HOME, DRAW, AWAY su tutte le righe di filtered_df.
-    Per il LAY, la responsabilità è fissa a 1 unità.
+    Calcola profitti e ROI% per BACK e LAY (liability fissa=1) su HOME/DRAW/AWAY.
+    commission: usata solo per BACK (se si vuole simularla), 0 di default.
     """
-    profits_back = {"HOME": 0, "DRAW": 0, "AWAY": 0}
-    profits_lay = {"HOME": 0, "DRAW": 0, "AWAY": 0}
-    matches = len(filtered_df)
+    if df.empty:
+        zero = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
+        return zero, zero, zero, zero, 0
 
-    for _, row in filtered_df.iterrows():
-        h_goals = row["Home Goal FT"]
-        a_goals = row["Away Goal FT"]
+    # Quote come float
+    for c in ("Odd home", "Odd Draw", "Odd Away"):
+        if c in df.columns:
+            df[c] = _coerce_float(df[c])
 
-        result = (
-            "HOME" if h_goals > a_goals else
-            "AWAY" if h_goals < a_goals else
-            "DRAW"
-        )
+    profits_back = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
+    profits_lay = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
+    matches = len(df)
 
-        for outcome in ["HOME", "DRAW", "AWAY"]:
-            if outcome == "HOME":
-                price = row.get("Odd home", None)
-            elif outcome == "DRAW":
-                price = row.get("Odd Draw", None)
-            elif outcome == "AWAY":
-                price = row.get("Odd Away", None)
+    for _, row in df.iterrows():
+        hg, ag = row["Home Goal FT"], row["Away Goal FT"]
+        result = "HOME" if hg > ag else "AWAY" if hg < ag else "DRAW"
 
-            try:
-                price = float(price)
-            except:
-                price = 2.00
+        prices = {
+            "HOME": float(row.get("Odd home", np.nan)),
+            "DRAW": float(row.get("Odd Draw", np.nan)),
+            "AWAY": float(row.get("Odd Away", np.nan)),
+        }
+        # sanitize
+        for k, v in prices.items():
+            if not (v and v > 1.0 and np.isfinite(v)):
+                prices[k] = 2.0  # default
 
-            if price <= 1:
-                price = 2.00
-
+        for outcome in ("HOME", "DRAW", "AWAY"):
+            p = prices[outcome]
             # BACK
             if result == outcome:
-                profits_back[outcome] += (price - 1)
+                profits_back[outcome] += (p - 1) * (1 - commission)
             else:
                 profits_back[outcome] -= 1
-
-            # LAY corretto → responsabilità = 1
-            stake = 1 / (price - 1)
+            # LAY liability=1
+            stake = 1.0 / (p - 1.0)
             if result != outcome:
                 profits_lay[outcome] += stake
             else:
-                profits_lay[outcome] -= 1
+                profits_lay[outcome] -= 1.0
 
-    rois_back = {}
-    rois_lay = {}
-    for outcome in ["HOME", "DRAW", "AWAY"]:
-        if matches > 0:
-            rois_back[outcome] = round((profits_back[outcome] / matches) * 100, 2)
-            rois_lay[outcome] = round((profits_lay[outcome] / matches) * 100, 2)
-        else:
-            rois_back[outcome] = 0
-            rois_lay[outcome] = 0
-
+    rois_back = {k: round((v / matches) * 100, 2) for k, v in profits_back.items()}
+    rois_lay = {k: round((v / matches) * 100, 2) for k, v in profits_lay.items()}
     return profits_back, rois_back, profits_lay, rois_lay, matches
 
-# --------------------------------------------------------
-# RUN PRE MATCH PAGE
-# --------------------------------------------------------
-def run_pre_match(df, db_selected):
+# ==========================
+# ROI Over/Under/BTTS
+# ==========================
+def _calc_market_roi(df: pd.DataFrame, market: str, price_cols: list[str],
+                     line: float | None, commission: float, manual_price: float | None = None):
+    """
+    Calcola ROI per un singolo mercato:
+    - market: "Over 1.5" | "Over 2.5" | "Over 3.5" | "BTTS"
+    - price_cols: sinonimi accettati per la colonna quota (es. ["cotao", "Odd Over 2.5", "odd over 2,5"])
+    - line: soglia goal (None per BTTS)
+    - commission: es. 0.045
+    - manual_price: quota di fallback se la colonna manca o è < 1.01
+    """
+    if df.empty:
+        return {
+            "Mercato": market, "Quota Media": np.nan, "Esiti %": "0.0%",
+            "ROI Back %": "0.0%", "ROI Lay %": "0.0%", "Match Analizzati": 0
+        }
+
+    col = _first_present(price_cols, df.columns)  # None se non presente
+    odds = _coerce_float(df[col]) if col else pd.Series([np.nan] * len(df), index=df.index)
+    if manual_price and (odds.isna() | (odds < 1.01)).all():
+        odds = pd.Series([manual_price] * len(df), index=df.index)
+    else:
+        # riempi i buchi con manual_price se presente
+        if manual_price is not None:
+            odds = odds.where(odds >= 1.01, manual_price)
+
+    hits = 0
+    back_profit = 0.0
+    lay_profit = 0.0
+    total = 0
+    qsum = 0.0
+    qcount = 0
+
+    for i, row in df.iterrows():
+        o = float(odds.loc[i]) if i in odds.index else float("nan")
+        if not (o and o >= 1.01 and np.isfinite(o)):
+            continue
+
+        total += 1
+        qsum += o; qcount += 1
+
+        goals = int(row["Home Goal FT"]) + int(row["Away Goal FT"])
+
+        if market == "BTTS":
+            goal_both = (row["Home Goal FT"] > 0) and (row["Away Goal FT"] > 0)
+            if goal_both:
+                hits += 1
+                back_profit += (o - 1) * (1 - commission)
+                lay_profit -= 1
+            else:
+                lay_profit += 1 / (o - 1)
+                back_profit -= 1
+        else:
+            assert line is not None
+            if goals > line:
+                hits += 1
+                back_profit += (o - 1) * (1 - commission)
+                lay_profit -= 1
+            else:
+                lay_profit += 1 / (o - 1)
+                back_profit -= 1
+
+    avg_quote = round(qsum / qcount, 2) if qcount > 0 else np.nan
+    pct = round((hits / total) * 100, 2) if total > 0 else 0.0
+    roi_back = round((back_profit / total) * 100, 2) if total > 0 else 0.0
+    roi_lay = round((lay_profit / total) * 100, 2) if total > 0 else 0.0
+
+    return {
+        "Mercato": market,
+        "Quota Media": avg_quote,
+        "Esiti %": f"{pct}%",
+        "ROI Back %": f"{roi_back}%",
+        "ROI Lay %": f"{roi_lay}%",
+        "Match Analizzati": total
+    }
+
+# ==========================
+# ENTRY POINT
+# ==========================
+def run_pre_match(df: pd.DataFrame, db_selected: str):
     st.title("⚔️ Confronto Pre Match")
 
+    # Normalizzazioni coerenti col campionato
+    if "country" not in df.columns:
+        st.error("Dataset senza colonna 'country'.")
+        st.stop()
+
+    df = df.copy()
+    df["country"] = _ensure_str(df["country"]).str.strip().str.upper()
+    league = (db_selected or "").strip().upper()
+    df = df[df["country"] == league]
+
+    if df.empty:
+        st.warning(f"Nessun dato per il campionato '{league}'.")
+        st.stop()
+
+    # Label: calcolala una volta sola se manca
     if "Label" not in df.columns:
-        df = df.copy()
         df["Label"] = df.apply(label_match, axis=1)
 
-    df["Home"] = df["Home"].str.strip()
-    df["Away"] = df["Away"].str.strip()
+    # Stringhe squadre safe
+    df["Home"] = _ensure_str(df["Home"]).str.strip()
+    df["Away"] = _ensure_str(df["Away"]).str.strip()
 
-    teams_available = sorted(
-        set(df[df["country"] == db_selected]["Home"].dropna().unique()) |
-        set(df[df["country"] == db_selected]["Away"].dropna().unique())
-    )
+    teams_available = sorted(set(df["Home"].dropna().unique()) | set(df["Away"].dropna().unique()))
 
-    # ✅ Session State inizializzazione
+    # Stato iniziale
     if "squadra_casa" not in st.session_state:
         st.session_state["squadra_casa"] = teams_available[0] if teams_available else ""
-
     if "squadra_ospite" not in st.session_state:
-        st.session_state["squadra_ospite"] = teams_available[0] if teams_available else ""
+        st.session_state["squadra_ospite"] = teams_available[1] if len(teams_available) > 1 else st.session_state["squadra_casa"]
 
-    col1, col2 = st.columns(2)
-
-    with col1:
+    # Selettori squadre
+    c1, c2 = st.columns(2)
+    with c1:
         squadra_casa = st.selectbox(
             "Seleziona Squadra Casa",
             options=teams_available,
             index=teams_available.index(st.session_state["squadra_casa"]) if st.session_state["squadra_casa"] in teams_available else 0,
-            key=f"squadra_casa_{db_selected}"
+            key=_k(f"squadra_casa_{league}")
         )
-
-    with col2:
+    with c2:
         squadra_ospite = st.selectbox(
             "Seleziona Squadra Ospite",
             options=teams_available,
             index=teams_available.index(st.session_state["squadra_ospite"]) if st.session_state["squadra_ospite"] in teams_available else 0,
-            key=f"squadra_ospite_{db_selected}"
-
+            key=_k(f"squadra_ospite_{league}")
         )
 
-    col1, col2, col3 = st.columns(3)
+    # Quote 1X2 inserite manualmente (per label detection)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        odd_home = st.number_input("Quota Vincente Casa", min_value=1.01, step=0.01, value=st.session_state.get("quota_home", 2.00), key=_k("quota_home"))
+        st.markdown(f"**Probabilità Casa ({squadra_casa}):** {round(100/odd_home, 2)}%")
+    with c2:
+        odd_draw = st.number_input("Quota Pareggio", min_value=1.01, step=0.01, value=st.session_state.get("quota_draw", 3.20), key=_k("quota_draw"))
+        st.markdown(f"**Probabilità Pareggio:** {round(100/odd_draw, 2)}%")
+    with c3:
+        odd_away = st.number_input("Quota Vincente Ospite", min_value=1.01, step=0.01, value=st.session_state.get("quota_away", 3.80), key=_k("quota_away"))
+        st.markdown(f"**Probabilità Ospite ({squadra_ospite}):** {round(100/odd_away, 2)}%")
 
-    with col1:
-        odd_home = st.number_input("Quota Vincente Casa", min_value=1.01, step=0.01, value=st.session_state.get("quota_home", 2.00))
-        implied_home = round(100 / odd_home, 2)
-        st.markdown(f"**Probabilità Casa ({squadra_casa}):** {implied_home}%")
+    if not (squadra_casa and squadra_ospite and squadra_casa != squadra_ospite):
+        st.info("Seleziona due squadre diverse per procedere.")
+        return
 
-    with col2:
-        odd_draw = st.number_input("Quota Pareggio", min_value=1.01, step=0.01, value=st.session_state.get("quota_draw", 3.20))
-        implied_draw = round(100 / odd_draw, 2)
-        st.markdown(f"**Probabilità Pareggio:** {implied_draw}%")
+    # Label dal range quote inserite
+    label = _label_from_odds(float(odd_home), float(odd_away))
+    label_type = _label_type(label)
+    st.markdown(f"### 🎯 Range di quota identificato (Label): `{label}`")
 
-    with col3:
-        odd_away = st.number_input("Quota Vincente Ospite", min_value=1.01, step=0.01, value=st.session_state.get("quota_away", 3.80))
-        implied_away = round(100 / odd_away, 2)
-        st.markdown(f"**Probabilità Ospite ({squadra_ospite}):** {implied_away}%")
+    if label == "Others" or label not in set(df["Label"]):
+        st.info("⚠️ Nessuna partita trovata per questo label nel campionato: uso l'intero campionato.")
+        label = None
 
+    # DEBUG opzionale
+    with st.expander("🔧 DEBUG", expanded=False):
+        st.write("Campionato:", league)
+        st.write("Label attivo:", label)
+        st.write("Righe campionato:", len(df))
 
-    if squadra_casa and squadra_ospite and squadra_casa != squadra_ospite:
-        implied_home = round(100 / odd_home, 2)
-        implied_draw = round(100 / odd_draw, 2)
-        implied_away = round(100 / odd_away, 2)
+    # ==========================
+    # League (per label se disponibile, altrimenti all league)
+    # ==========================
+    df_league_scope = df[df["Label"] == label] if label else df
+    profits_back, rois_back, profits_lay, rois_lay, matches_league = _calc_back_lay_1x2(df_league_scope)
 
-        label = label_from_odds(odd_home, odd_away)
-        label_type = get_label_type(label)
+    league_stats = _league_data_by_label(df, label) if label else _league_data_by_label(df, _label_from_odds(2.0, 2.0))  # fallback neutro
+    row_league = {
+        "LABEL": "League (Label)" if label else "League (All)",
+        "MATCHES": matches_league,
+        "BACK WIN% HOME": round(league_stats["HomeWin_pct"], 2) if league_stats else 0,
+        "BACK WIN% DRAW": round(league_stats["Draw_pct"], 2) if league_stats else 0,
+        "BACK WIN% AWAY": round(league_stats["AwayWin_pct"], 2) if league_stats else 0,
+    }
+    for outcome in ("HOME", "DRAW", "AWAY"):
+        row_league[f"BACK PTS {outcome}"] = _format_value(profits_back[outcome])
+        row_league[f"BACK ROI% {outcome}"] = _format_value(rois_back[outcome], is_roi=True)
+        row_league[f"Lay pts {outcome}"] = _format_value(profits_lay[outcome])
+        row_league[f"lay ROI% {outcome}"] = _format_value(rois_lay[outcome], is_roi=True)
 
-        st.markdown(f"### 🎯 Range di quota identificato (Label): `{label}`")
+    # ==========================
+    # Squadra Casa
+    # ==========================
+    rows = [row_league]
+    row_home = {"LABEL": squadra_casa}
+    if label and label_type in ("Home", "Both"):
+        df_home = df[(df["Label"] == label) & (df["Home"] == squadra_casa)]
+        if df_home.empty:
+            df_home = df[df["Home"] == squadra_casa]
+            st.info(f"⚠️ Nessuna partita per questo label. Uso tutte le partite di {squadra_casa}.")
+    else:
+        df_home = df[df["Home"] == squadra_casa]
 
-        if label == "Others":
-            st.info("⚠️ Le quote inserite non rientrano in nessun range di quota. Verranno calcolate statistiche su tutto il campionato.")
-            label = None
-        elif label not in df["Label"].unique() or df[df["Label"] == label].empty:
-            st.info(f"⚠️ Nessuna partita trovata per il Label `{label}`. Verranno calcolate statistiche su tutto il campionato.")
-            label = None
+    profits_back, rois_back, profits_lay, rois_lay, matches_home = _calc_back_lay_1x2(df_home)
+    if matches_home > 0:
+        wins_home = int((df_home["Home Goal FT"] > df_home["Away Goal FT"]).sum())
+        draws_home = int((df_home["Home Goal FT"] == df_home["Away Goal FT"]).sum())
+        losses_home = int((df_home["Home Goal FT"] < df_home["Away Goal FT"]).sum())
+        row_home["MATCHES"] = matches_home
+        row_home["BACK WIN% HOME"] = round((wins_home / matches_home) * 100, 2)
+        row_home["BACK WIN% DRAW"] = round((draws_home / matches_home) * 100, 2)
+        row_home["BACK WIN% AWAY"] = round((losses_home / matches_home) * 100, 2)
+    else:
+        row_home["MATCHES"] = 0
+        row_home["BACK WIN% HOME"] = row_home["BACK WIN% DRAW"] = row_home["BACK WIN% AWAY"] = 0.0
 
-        rows = []
+    for outcome in ("HOME", "DRAW", "AWAY"):
+        row_home[f"BACK PTS {outcome}"] = _format_value(profits_back[outcome])
+        row_home[f"BACK ROI% {outcome}"] = _format_value(rois_back[outcome], is_roi=True)
+        row_home[f"Lay pts {outcome}"] = _format_value(profits_lay[outcome])
+        row_home[f"lay ROI% {outcome}"] = _format_value(rois_lay[outcome], is_roi=True)
+    rows.append(row_home)
 
-        # ---------------------------
-        # League
-        # ---------------------------
-        if label:
-            filtered_league = df[df["Label"] == label]
-            profits_back, rois_back, profits_lay, rois_lay, matches_league = calculate_back_lay(filtered_league)
+    # ==========================
+    # Squadra Ospite
+    # ==========================
+    row_away = {"LABEL": squadra_ospite}
+    if label and label_type in ("Away", "Both"):
+        df_away = df[(df["Label"] == label) & (df["Away"] == squadra_ospite)]
+        if df_away.empty:
+            df_away = df[df["Away"] == squadra_ospite]
+            st.info(f"⚠️ Nessuna partita per questo label. Uso tutte le partite di {squadra_ospite}.")
+    else:
+        df_away = df[df["Away"] == squadra_ospite]
 
-            league_stats = get_league_data_by_label(df, label)
-            row_league = {
-                "LABEL": "League",
-                "MATCHES": matches_league,
-                "BACK WIN% HOME": round(league_stats["HomeWin_pct"], 2) if league_stats else 0,
-                "BACK WIN% DRAW": round(league_stats["Draw_pct"], 2) if league_stats else 0,
-                "BACK WIN% AWAY": round(league_stats["AwayWin_pct"], 2) if league_stats else 0
-            }
-            for outcome in ["HOME", "DRAW", "AWAY"]:
-                row_league[f"BACK PTS {outcome}"] = format_value(profits_back[outcome])
-                row_league[f"BACK ROI% {outcome}"] = format_value(rois_back[outcome], is_roi=True)
-                row_league[f"Lay pts {outcome}"] = format_value(profits_lay[outcome])
-                row_league[f"lay ROI% {outcome}"] = format_value(rois_lay[outcome], is_roi=True)
-            rows.append(row_league)
+    profits_back, rois_back, profits_lay, rois_lay, matches_away = _calc_back_lay_1x2(df_away)
+    if matches_away > 0:
+        wins_away = int((df_away["Away Goal FT"] > df_away["Home Goal FT"]).sum())
+        draws_away = int((df_away["Away Goal FT"] == df_away["Home Goal FT"]).sum())
+        losses_away = int((df_away["Away Goal FT"] < df_away["Home Goal FT"]).sum())
+        row_away["MATCHES"] = matches_away
+        # prospettiva “segno”: per la squadra away, la % HOME WIN è la % di sconfitte
+        row_away["BACK WIN% HOME"] = round((losses_away / matches_away) * 100, 2)
+        row_away["BACK WIN% DRAW"] = round((draws_away / matches_away) * 100, 2)
+        row_away["BACK WIN% AWAY"] = round((wins_away / matches_away) * 100, 2)
+    else:
+        row_away["MATCHES"] = 0
+        row_away["BACK WIN% HOME"] = row_away["BACK WIN% DRAW"] = row_away["BACK WIN% AWAY"] = 0.0
 
-        # ---------------------------
-        # Squadra Casa
-        # ---------------------------
-        row_home = {"LABEL": squadra_casa}
-        if label and label_type in ["Home", "Both"]:
-            filtered_home = df[(df["Label"] == label) & (df["Home"] == squadra_casa)]
+    for outcome in ("HOME", "DRAW", "AWAY"):
+        row_away[f"BACK PTS {outcome}"] = _format_value(profits_back[outcome])
+        row_away[f"BACK ROI% {outcome}"] = _format_value(rois_back[outcome], is_roi=True)
+        row_away[f"Lay pts {outcome}"] = _format_value(profits_lay[outcome])
+        row_away[f"lay ROI% {outcome}"] = _format_value(rois_lay[outcome], is_roi=True)
+    rows.append(row_away)
 
-            if filtered_home.empty:
-                filtered_home = df[df["Home"] == squadra_casa]
-                st.info(f"⚠️ Nessuna partita trovata per questo label. Calcolo eseguito su TUTTO il database per {squadra_casa}.")
+    # Tabella long
+    rows_long = []
+    for row in rows:
+        for outcome in ("HOME", "DRAW", "AWAY"):
+            rows_long.append({
+                "LABEL": row["LABEL"],
+                "SEGNO": outcome,
+                "Matches": row.get("MATCHES", 0),
+                "Win %": row.get(f"BACK WIN% {outcome}", 0),
+                "Back Pts": row.get(f"BACK PTS {outcome}", _format_value(0)),
+                "Back ROI %": row.get(f"BACK ROI% {outcome}", _format_value(0, is_roi=True)),
+                "Lay Pts": row.get(f"Lay pts {outcome}", _format_value(0)),
+                "Lay ROI %": row.get(f"lay ROI% {outcome}", _format_value(0, is_roi=True)),
+            })
+    df_long = pd.DataFrame(rows_long)
+    df_long.loc[df_long.duplicated(subset=["LABEL"]), "LABEL"] = ""
 
-            with st.expander(f"DEBUG - Partite Home per {squadra_casa}"):
-                st.write(filtered_home)
+    st.markdown(f"#### Range di quota identificato (Label): `{label or 'ALL'}`")
+    st.dataframe(df_long, use_container_width=True)
 
-            profits_back, rois_back, profits_lay, rois_lay, matches_home = calculate_back_lay(filtered_home)
+    # ==========================
+    # Confronto macro-kpi squadre
+    # ==========================
+    st.markdown("---")
+    st.markdown("## 📊 Confronto Statistiche Pre-Match")
+    stats_home = compute_team_macro_stats(df, squadra_casa, "Home")
+    stats_away = compute_team_macro_stats(df, squadra_ospite, "Away")
 
-            if matches_home > 0:
-                wins_home = sum(filtered_home["Home Goal FT"] > filtered_home["Away Goal FT"])
-                draws_home = sum(filtered_home["Home Goal FT"] == filtered_home["Away Goal FT"])
-                losses_home = sum(filtered_home["Home Goal FT"] < filtered_home["Away Goal FT"])
+    if not stats_home or not stats_away:
+        st.info("⚠️ Una delle due squadre non ha match disponibili per il confronto.")
+        return
 
-                pct_win_home = round((wins_home / matches_home) * 100, 2)
-                pct_draw = round((draws_home / matches_home) * 100, 2)
-                pct_loss = round((losses_home / matches_home) * 100, 2)
-            else:
-                pct_win_home = pct_draw = pct_loss = 0
+    df_comp = pd.DataFrame({squadra_casa: stats_home, squadra_ospite: stats_away})
+    st.dataframe(df_comp, use_container_width=True)
 
-            row_home["MATCHES"] = matches_home
-            row_home["BACK WIN% HOME"] = pct_win_home
-            row_home["BACK WIN% DRAW"] = pct_draw
-            row_home["BACK WIN% AWAY"] = pct_loss
+    st.success("✅ Confronto Pre Match generato con successo!")
+    st.header("📈 ROI Back & Lay + EV Live (Over e BTTS)")
 
-            for outcome in ["HOME", "DRAW", "AWAY"]:
-                row_home[f"BACK PTS {outcome}"] = format_value(profits_back[outcome])
-                row_home[f"BACK ROI% {outcome}"] = format_value(rois_back[outcome], is_roi=True)
-                row_home[f"Lay pts {outcome}"] = format_value(profits_lay[outcome])
-                row_home[f"lay ROI% {outcome}"] = format_value(rois_lay[outcome], is_roi=True)
+    # ==========================
+    # ROI mercati (solo label o tutto)
+    # ==========================
+    st.markdown("### 🎯 Calcolo ROI Back & Lay su Over 1.5, 2.5, 3.5 e BTTS")
+    commission = 0.045
+
+    # Scope per EV/ROI mercati: usa label se disponibile, altrimenti tutto il campionato
+    df_ev_scope = df[df["Label"] == label].copy() if label else df.copy()
+    # filtra solo match con punteggi noti
+    df_ev_scope = df_ev_scope.dropna(subset=["Home Goal FT", "Away Goal FT"])
+
+    # Sinonimi colonne quote
+    OVER15_COLS = ["cotao1", "Odd Over 1.5", "odd over 1,5", "Over 1.5"]
+    OVER25_COLS = ["cotao", "Odd Over 2.5", "odd over 2,5", "Over 2.5"]
+    OVER35_COLS = ["cotao3", "Odd Over 3.5", "odd over 3,5", "Over 3.5"]
+    BTTS_YES_COLS = ["gg", "GG", "odd goal", "BTTS Yes", "Odd BTTS Yes"]
+
+    # Quote manuali di fallback
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        q_ov15 = st.number_input("📥 Quota Over 1.5 (fallback)", min_value=1.01, step=0.01, value=2.00, key=_k("q_ov15"))
+    with c2:
+        q_ov25 = st.number_input("📥 Quota Over 2.5 (fallback)", min_value=1.01, step=0.01, value=2.00, key=_k("q_ov25"))
+    with c3:
+        q_ov35 = st.number_input("📥 Quota Over 3.5 (fallback)", min_value=1.01, step=0.01, value=2.00, key=_k("q_ov35"))
+    with c4:
+        q_btts = st.number_input("📥 Quota BTTS (fallback)", min_value=1.01, step=0.01, value=2.00, key=_k("q_btts"))
+
+    table_data = []
+    table_data.append(_calc_market_roi(df_ev_scope, "Over 1.5", OVER15_COLS, 1.5, commission, q_ov15))
+    table_data.append(_calc_market_roi(df_ev_scope, "Over 2.5", OVER25_COLS, 2.5, commission, q_ov25))
+    table_data.append(_calc_market_roi(df_ev_scope, "Over 3.5", OVER35_COLS, 3.5, commission, q_ov35))
+    table_data.append(_calc_market_roi(df_ev_scope, "BTTS", BTTS_YES_COLS, None, commission, q_btts))
+
+    df_ev = pd.DataFrame(table_data)
+    st.dataframe(df_ev, use_container_width=True)
+
+    # ==========================
+    # EV manuale (placeholder probabilità)
+    # ==========================
+    st.markdown("## 🧠 Expected Value (EV) Manuale")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        quota_ov15 = st.number_input("Quota Live Over 1.5", min_value=1.01, step=0.01, value=2.00, key=_k("ev_ov15"))
+    with c2:
+        quota_ov25 = st.number_input("Quota Live Over 2.5", min_value=1.01, step=0.01, value=2.00, key=_k("ev_ov25"))
+    with c3:
+        quota_ov35 = st.number_input("Quota Live Over 3.5", min_value=1.01, step=0.01, value=2.00, key=_k("ev_ov35"))
+    with c4:
+        quota_btts = st.number_input("Quota Live BTTS", min_value=1.01, step=0.01, value=2.00, key=_k("ev_btts"))
+
+    # TODO: calcolare prob storiche dal df_ev_scope (es. % Over 2.5)
+    ev_rows = []
+    for name, q, line in [
+        ("Over 1.5", quota_ov15, 1.5),
+        ("Over 2.5", quota_ov25, 2.5),
+        ("Over 3.5", quota_ov35, 3.5),
+        ("BTTS",  quota_btts, None),
+    ]:
+        # Probabilità storica grezza come esempio (puoi raffinare con filtri su squadra, label, etc.)
+        if name == "BTTS":
+            prob_hist = float(((df_ev_scope["Home Goal FT"] > 0) & (df_ev_scope["Away Goal FT"] > 0)).mean() * 100) if not df_ev_scope.empty else 0.0
         else:
-            row_home["MATCHES"] = "N/A"
-            for outcome in ["HOME", "DRAW", "AWAY"]:
-                row_home[f"BACK WIN% {outcome}"] = 0
-                row_home[f"BACK PTS {outcome}"] = format_value(0)
-                row_home[f"BACK ROI% {outcome}"] = format_value(0, is_roi=True)
-                row_home[f"Lay pts {outcome}"] = format_value(0)
-                row_home[f"lay ROI% {outcome}"] = format_value(0, is_roi=True)
-        rows.append(row_home)
+            prob_hist = float(((df_ev_scope["Home Goal FT"] + df_ev_scope["Away Goal FT"]) > line).mean() * 100) if not df_ev_scope.empty else 0.0
 
-        # ---------------------------
-        # Squadra Ospite
-        # ---------------------------
-        row_away = {"LABEL": squadra_ospite}
-        if label and label_type in ["Away", "Both"]:
-            filtered_away = df[(df["Label"] == label) & (df["Away"] == squadra_ospite)]
-
-            if filtered_away.empty:
-                filtered_away = df[df["Away"] == squadra_ospite]
-                st.info(f"⚠️ Nessuna partita trovata per questo label. Calcolo eseguito su TUTTO il database per {squadra_ospite}.")
-
-            with st.expander(f"DEBUG - Partite Away per {squadra_ospite}"):
-                st.write(filtered_away)
-
-            profits_back, rois_back, profits_lay, rois_lay, matches_away = calculate_back_lay(filtered_away)
-
-            if matches_away > 0:
-                wins_away = sum(filtered_away["Away Goal FT"] > filtered_away["Home Goal FT"])
-                draws_away = sum(filtered_away["Away Goal FT"] == filtered_away["Home Goal FT"])
-                losses_away = sum(filtered_away["Away Goal FT"] < filtered_away["Home Goal FT"])
-
-                pct_win_away = round((wins_away / matches_away) * 100, 2)
-                pct_draw = round((draws_away / matches_away) * 100, 2)
-                pct_loss = round((losses_away / matches_away) * 100, 2)
-            else:
-                pct_win_away = pct_draw = pct_loss = 0
-
-            row_away["MATCHES"] = matches_away
-            row_away["BACK WIN% HOME"] = pct_loss
-            row_away["BACK WIN% DRAW"] = pct_draw
-            row_away["BACK WIN% AWAY"] = pct_win_away
-
-            for outcome in ["HOME", "DRAW", "AWAY"]:
-                row_away[f"BACK PTS {outcome}"] = format_value(profits_back[outcome])
-                row_away[f"BACK ROI% {outcome}"] = format_value(rois_back[outcome], is_roi=True)
-                row_away[f"Lay pts {outcome}"] = format_value(profits_lay[outcome])
-                row_away[f"lay ROI% {outcome}"] = format_value(rois_lay[outcome], is_roi=True)
-        else:
-            row_away["MATCHES"] = "N/A"
-            for outcome in ["HOME", "DRAW", "AWAY"]:
-                row_away[f"BACK WIN% {outcome}"] = 0
-                row_away[f"BACK PTS {outcome}"] = format_value(0)
-                row_away[f"BACK ROI% {outcome}"] = format_value(0, is_roi=True)
-                row_away[f"Lay pts {outcome}"] = format_value(0)
-                row_away[f"lay ROI% {outcome}"] = format_value(0, is_roi=True)
-        rows.append(row_away)
-
-        # ------------------------------------------
-        # CONVERSIONE TABELLA IN LONG FORMAT
-        # ------------------------------------------
-        rows_long = []
-        for row in rows:
-            for outcome in ["HOME", "DRAW", "AWAY"]:
-                rows_long.append({
-                    "LABEL": row["LABEL"],
-                    "SEGNO": outcome,
-                    "Matches": row["MATCHES"],
-                    "Win %": row.get(f"BACK WIN% {outcome}", 0),
-                    "Back Pts": row.get(f"BACK PTS {outcome}", format_value(0)),
-                    "Back ROI %": row.get(f"BACK ROI% {outcome}", format_value(0, is_roi=True)),
-                    "Lay Pts": row.get(f"Lay pts {outcome}", format_value(0)),
-                    "Lay ROI %": row.get(f"lay ROI% {outcome}", format_value(0, is_roi=True))
-                })
-
-        df_long = pd.DataFrame(rows_long)
-        df_long.loc[df_long.duplicated(subset=["LABEL"]), "LABEL"] = ""
-
-        st.markdown(f"#### Range di quota identificato (Label): `{label}`")
-        st.dataframe(df_long, use_container_width=True)
-
-        # -------------------------------------------------------
-        # CONFRONTO MACRO STATS
-        # -------------------------------------------------------
-        st.markdown("---")
-        st.markdown("## 📊 Confronto Statistiche Pre-Match")
-
-        stats_home = compute_team_macro_stats(df, squadra_casa, "Home")
-        stats_away = compute_team_macro_stats(df, squadra_ospite, "Away")
-
-        if not stats_home or not stats_away:
-            st.info("⚠️ Una delle due squadre non ha partite disponibili per il confronto.")
-            return
-
-        df_comp = pd.DataFrame({
-            squadra_casa: stats_home,
-            squadra_ospite: stats_away
+        ev = round(q * (prob_hist / 100) - 1, 2)
+        nota = "🟢 EV+" if ev > 0 else ("🔴 EV-" if ev < 0 else "⚪️ Neutro")
+        ev_rows.append({
+            "Mercato": name,
+            "Quota": q,
+            "Probabilità Storica": f"{prob_hist:.1f}%",
+            "EV": ev,
+            "Note": nota
         })
 
-        st.dataframe(df_comp, use_container_width=True)
-
-        st.success("✅ Confronto Pre Match generato con successo!")
-        st.header("📈 ROI Back & Lay + EV Live (Over e BTTS)")
-
-        commission = 0.045
-        df_label_ev = df.copy()
-        df_label_ev["Label"] = df_label_ev.apply(label_match, axis=1)
-        df_label_ev = df_label_ev[df_label_ev["Label"] == label]
-        df_label_ev = df_label_ev.dropna(subset=["Home Goal FT", "Away Goal FT"])
-
-        st.markdown("### 🎯 Calcolo ROI Back & Lay su Over 1.5, 2.5, 3.5 e BTTS")
-
-        lines = {
-            "Over 1.5": ("cotao1", 1.5),
-            "Over 2.5": ("cotao", 2.5),
-            "Over 3.5": ("cotao3", 3.5),
-            "BTTS": ("gg", None)
-        }
-
-        table_data = []
-
-        for label_text, (col_name, goal_line) in lines.items():
-            total = 0
-            back_profit = 0
-            lay_profit = 0
-            quote_list = []
-            hits = 0
-
-            for _, row in df_label_ev.iterrows():
-                goals = row["Home Goal FT"] + row["Away Goal FT"]
-                gg = row.get("gg", None)
-                odd = row.get(col_name, None)
-
-                if pd.isna(odd) or odd < 1.01:
-                    continue
-
-                quote_list.append(odd)
-                total += 1
-
-                if label_text == "BTTS":
-                    if gg == 1:
-                        hits += 1
-                        back_profit += (odd - 1) * (1 - commission)
-                        lay_profit -= 1
-                    else:
-                        lay_profit += 1 / (odd - 1)
-                        back_profit -= 1
-                else:
-                    if goals > goal_line:
-                        hits += 1
-                        back_profit += (odd - 1) * (1 - commission)
-                        lay_profit -= 1
-                    else:
-                        lay_profit += 1 / (odd - 1)
-                        back_profit -= 1
-
-            if total > 0:
-                avg_quote = round(sum(quote_list) / len(quote_list), 2)
-                pct = round((hits / total) * 100, 2)
-                roi_back = round((back_profit / total) * 100, 2)
-                roi_lay = round((lay_profit / total) * 100, 2)
-
-                table_data.append({
-                    "Mercato": label_text,
-                    "Quota Media": avg_quote,
-                    "Esiti %": f"{pct}%",
-                    "ROI Back %": f"{roi_back}%",
-                    "ROI Lay %": f"{roi_lay}%",
-                    "Match Analizzati": total
-                })
-
-        df_ev = pd.DataFrame(table_data)
-        st.dataframe(df_ev, use_container_width=True)
-
-        # -------------------------------------------------------
-        # ⚖️ ROI OVER / UNDER 2.5 con quote reali dal database
-        # -------------------------------------------------------
-        st.markdown("## ⚖️ ROI Over / Under 2.5 Goals")
-
-        apply_team_filter = st.checkbox("🔍 Calcola ROI solo sui match delle squadre selezionate che rientrano nel range (label)", value=True)
-
-        commission = 0.045
-
-        df_label = df.copy()
-        df_label["LabelTemp"] = df_label.apply(label_match, axis=1)
-        df_label = df_label[df_label["LabelTemp"] == label]
-
-        if apply_team_filter:
-            df_label = df_label[
-                (df_label["Home"] == st.session_state["squadra_casa"]) | (df_label["Away"] == st.session_state["squadra_ospite"])
-            ]
-
-        st.markdown("### 🔍 DEBUG - Partite incluse nel ROI Over/Under")
-        st.write("Totali partite filtrate (Label + Squadre):", len(df_label))
-
-        excluded_df = df_label[
-            df_label["Home Goal FT"].isna() | df_label["Away Goal FT"].isna()
-        ]
-        included_df = df_label[
-            df_label["Home Goal FT"].notna() & df_label["Away Goal FT"].notna()
-        ]
-
-        st.write("✅ Partite incluse nel calcolo ROI (gol disponibili):", len(included_df))
-        st.write("❌ Partite escluse (mancano i gol):", len(excluded_df))
-
-        with st.expander("📋 Visualizza match esclusi"):
-            st.dataframe(excluded_df[["Home", "Away", "Home Goal FT", "Away Goal FT"]])
-
-        df_label = included_df.copy()
-
-        total = 0
-        profit_over = 0
-        profit_under = 0
-        over_hits = 0
-        under_hits = 0
-        quote_over_list = []
-        quote_under_list = []
-
-        
-        # Inserimento quote manuali
-        quota_inserita_over = st.number_input("📥 Inserisci quota Over 2.5 per ROI", min_value=1.01, step=0.01, value=st.session_state.get("quota_over", 2.00), key="quota_over_roi")
-        quota_inserita_under = st.number_input("📥 Inserisci quota Under 2.5 per ROI", min_value=1.01, step=0.01, value=st.session_state.get("quota_under", 1.80), key="quota_under_roi")
-
-        for _, row in df_label.iterrows():
-            goals = row["Home Goal FT"] + row["Away Goal FT"]
-            quote_over = row.get("odd over 2,5", quota_inserita_over)
-            quote_under = row.get("odd under 2,5", quota_inserita_under)
-
-            # Se quote reali mancanti, usa quelle inserite
-            if pd.isna(quote_over) or quote_over < 1.01:
-                quote_over = quota_inserita_over
-            if pd.isna(quote_under) or quote_under < 1.01:
-                quote_under = quota_inserita_under
-
-            quote_over_list.append(quote_over)
-            quote_under_list.append(quote_under)
-            total += 1
-
-            if goals > 2.5:
-                over_hits += 1
-                profit_over += (quote_over - 1) * (1 - commission)
-                profit_under -= 1
-            else:
-                under_hits += 1
-                profit_under += (quote_under - 1) * (1 - commission)
-                profit_over -= 1
-
-            goals = row["Home Goal FT"] + row["Away Goal FT"]
-            quote_over = row.get("odd over 2,5", None)
-            quote_under = row.get("odd under 2,5", None)
-
-            if pd.isna(quote_over) or pd.isna(quote_under) or quote_over < 1.01 or quote_under < 1.01:
-                continue
-
-            quote_over_list.append(quote_over)
-            quote_under_list.append(quote_under)
-            total += 1
-
-            if goals > 2.5:
-                over_hits += 1
-                profit_over += (quote_over - 1) * (1 - commission)
-                profit_under -= 1
-            else:
-                under_hits += 1
-                profit_under += (quote_under - 1) * (1 - commission)
-                profit_over -= 1
-
-        if total > 0:
-            avg_quote_over = round(sum(quote_over_list) / len(quote_over_list), 2)
-            avg_quote_under = round(sum(quote_under_list) / len(quote_under_list), 2)
-            roi_over = round((profit_over / total) * 100, 2)
-            roi_under = round((profit_under / total) * 100, 2)
-            pct_over = round((over_hits / total) * 100, 2)
-            pct_under = round((under_hits / total) * 100, 2)
-
-            df_roi = pd.DataFrame([{
-                "Linea": "2.5 Goals",
-                "Quote Over": avg_quote_over,
-                "Quote Under": avg_quote_under,
-                "% Over": f"{pct_over}%",
-                "% Under": f"{pct_under}%",
-                "ROI Over": f"{roi_over}%",
-                "ROI Under": f"{roi_under}%",
-                "Profitto Over": round(profit_over, 2),
-                "Profitto Under": round(profit_under, 2),
-                "Match Analizzati": total
-            }])
-            st.dataframe(df_roi, use_container_width=True)
-
-            # -------------------------------------------------------
-            # 🧠 EV OVER / UNDER 2.5
-            # -------------------------------------------------------
-            
-        # -------------------------------------------------------
-        # 🧠 Expected Value (EV) Manuale - Allineato su una riga
-        # -------------------------------------------------------
-        st.markdown("## 🧠 Expected Value (EV) Manuale")
-
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            quota_ov15 = st.number_input("Quota Live per Over 1.5", min_value=1.01, step=0.01, value=2.00, key="quota_ev_ov15")
-        with col2:
-            quota_ov25 = st.number_input("Quota Live per Over 2.5", min_value=1.01, step=0.01, value=2.00, key="quota_ev_ov25")
-        with col3:
-            quota_ov35 = st.number_input("Quota Live per Over 3.5", min_value=1.01, step=0.01, value=2.00, key="quota_ev_ov35")
-        with col4:
-            quota_btts = st.number_input("Quota Live per BTTS", min_value=1.01, step=0.01, value=2.00, key="quota_ev_btts")
-
-        ev_data = [
-            {"Mercato": "Over 1.5", "Quota": quota_ov15},
-            {"Mercato": "Over 2.5", "Quota": quota_ov25},
-            {"Mercato": "Over 3.5", "Quota": quota_ov35},
-            {"Mercato": "BTTS", "Quota": quota_btts}
-        ]
-
-        ev_table = []
-        for row in ev_data:
-            prob = 0.0
-            ev = round((row["Quota"] * (prob / 100)) - 1, 2)
-            nota = "🟢 EV+" if ev > 0 else "🔴 EV-" if ev < 0 else "⚪️ Neutro"
-            ev_table.append({
-                "Mercato": row["Mercato"],
-                "Quota Inserita": row["Quota"],
-                "Probabilità Storica": f"{prob:.1f}%",
-                "EV": ev,
-                "Note": nota
-            })
-
-        st.dataframe(pd.DataFrame(ev_table), use_container_width=True)
-
-
-
+    st.dataframe(pd.DataFrame(ev_rows), use_container_width=True)
