@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import re
 import importlib.util
 import streamlit as st
 import pandas as pd
@@ -49,8 +50,7 @@ def get_callable(mod, *names, label: str = ""):
 # Carico utils.py in modo speciale e forzo il nome "utils"
 # -------------------------------------------------------
 _utils = load_local_module("app_utils", "utils.py")
-# 🔧 Forza tutti i 'import utils' degli altri file a usare questo
-sys.modules["utils"] = _utils
+sys.modules["utils"] = _utils  # forza gli import interni
 
 # Estraggo i simboli che servono da utils
 SUPABASE_URL = getattr(_utils, "SUPABASE_URL", "")
@@ -75,11 +75,10 @@ run_macro_stats = get_callable(_macros, "run_macro_stats", label="macros")
 run_team_stats = get_callable(_squadre, "run_team_stats", label="squadre")
 run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
 run_correct_score_ev = get_callable(_correct_score_ev_sezione, "run_correct_score_ev", label="correct_score_ev_sezione")
-# LIVE: nome corretto + varianti
 run_live_minuto_analysis = get_callable(
     _analisi_live_minuto,
-    "run_live_minute_analysis",   # ✅ nome presente nel file
-    "run_live_minuto_analysis",   # variante italiana
+    "run_live_minute_analysis",   # principale
+    "run_live_minuto_analysis",   # variante IT
     "run_live_minute",
     "run_live_minuto",
     "run_live",
@@ -90,44 +89,39 @@ run_partite_del_giorno = get_callable(_partite_del_giorno, "run_partite_del_gior
 run_reverse_engineering = get_callable(_reverse_engineering, "run_reverse_engineering", label="reverse_engineering")
 
 # -------------------------------------------------------
-# (Opzionali) provo a caricare moduli extra senza bloccare l'app
-# -------------------------------------------------------
-try:
-    from supabase import create_client  # noqa: F401
-except Exception:
-    create_client = None
-
-def try_load_optional(name: str, filename: str):
-    try:
-        return load_local_module(name, filename)
-    except Exception:
-        return None
-
-_api_football_utils = try_load_optional("api_football_utils", "api_football_utils.py")
-_ai_inference = try_load_optional("ai_inference", "ai_inference.py")
-_mappa_leghe_supabase = try_load_optional("mappa_leghe_supabase", "mappa_leghe_supabase.py")
-
-# -------------------------------------------------------
 # SUPPORTO
 # -------------------------------------------------------
-def get_league_mapping() -> dict:
-    """Recupera (opzionalmente) la mappa code -> league_name da Supabase."""
-    try:
-        if not create_client or not SUPABASE_URL or not SUPABASE_KEY:
-            return {}
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-        data = supabase.table("league_mapping").select("*").execute().data
-        mapping = {r["code"]: r["league_name"] for r in data}
-        mapping["Tutti"] = "Tutti i Campionati"
-        return mapping
-    except Exception:
-        return {}
-
 def _safe_to_datetime(series: pd.Series) -> pd.Series:
     try:
         return pd.to_datetime(series, errors="coerce")
     except Exception:
         return pd.to_datetime(series.astype(str), errors="coerce")
+
+def _season_sort_key(x: str) -> int:
+    """
+    Estrarre una chiave numerica per l'ordinamento stagioni.
+    Supporta formati: '2025', '2024-2025', '2024/25', '2024–25'.
+    Ritorna l'ANNO PIÙ RECENTE presente nella stringa (es. 2025).
+    """
+    if x is None:
+        return -1
+    s = str(x)
+    # cattura 4 cifre o 2 cifre
+    nums = re.findall(r"\d{4}|\d{2}", s)
+    if not nums:
+        # tenta cast diretto
+        try:
+            return int(s)
+        except Exception:
+            return -1
+    vals = []
+    for n in nums:
+        if len(n) == 4:
+            vals.append(int(n))
+        else:
+            # 2 cifre -> 2000+aa (es. '25' -> 2025)
+            vals.append(2000 + int(n))
+    return max(vals)
 
 # -------------------------------------------------------
 # CONFIGURAZIONE PAGINA
@@ -162,23 +156,6 @@ if origine_dati == "Supabase":
 else:
     df, db_selected = load_data_from_file()
 
-# Mappatura (opzionale) dei codici campionato in nomi leggibili
-league_dict = get_league_mapping()
-db_selected = league_dict.get(db_selected, db_selected)
-
-# Stato persistente per selezione squadre/campionato
-if "squadra_casa" not in st.session_state:
-    st.session_state["squadra_casa"] = ""
-if "squadra_ospite" not in st.session_state:
-    st.session_state["squadra_ospite"] = ""
-if "campionato_corrente" not in st.session_state:
-    st.session_state["campionato_corrente"] = db_selected
-else:
-    if st.session_state["campionato_corrente"] != db_selected:
-        st.session_state["squadra_casa"] = ""
-        st.session_state["squadra_ospite"] = ""
-        st.session_state["campionato_corrente"] = db_selected
-
 # -------------------------------------------------------
 # MAPPING COLONNE E PULIZIA
 # -------------------------------------------------------
@@ -198,7 +175,7 @@ col_map = {
     "place1a": "Posizione Classifica Home",
     "place2": "Posizione Classifica Away Generale",
     "place2d": "Posizione classifica away",
-    "cotaa": "Odd home",  # minuscolo per label_match
+    "cotaa": "Odd home",
     "cotad": "Odd Away",
     "cotae": "Odd Draw",
     "cotao0": "Odd Over 0.5",
@@ -271,10 +248,12 @@ if "Label" not in df.columns:
         df["Label"] = "Others"
 
 # -------------------------------------------------------
-# FILTRO STAGIONI (preset + personalizza)
+# FILTRO STAGIONI (preset + personalizza) — FIX ORDINAMENTO
 # -------------------------------------------------------
 if "Stagione" in df.columns:
-    stagioni_disponibili = sorted(df["Stagione"].dropna().astype(str).unique())
+    stag_raw = df["Stagione"].dropna().astype(str).unique().tolist()
+    # ordina per anno più recente dentro la stringa, in modo DESC
+    stagioni_disponibili = sorted(stag_raw, key=_season_sort_key, reverse=True)
 
     opzione_range = st.sidebar.selectbox(
         "Seleziona un intervallo stagioni predefinito:",
@@ -285,16 +264,16 @@ if "Stagione" in df.columns:
     if opzione_range == "Tutte":
         stagioni_scelte = stagioni_disponibili
     elif opzione_range == "Ultime 3":
-        stagioni_scelte = stagioni_disponibili[-3:]
+        stagioni_scelte = stagioni_disponibili[:3]
     elif opzione_range == "Ultime 5":
-        stagioni_scelte = stagioni_disponibili[-5:]
+        stagioni_scelte = stagioni_disponibili[:5]
     elif opzione_range == "Ultime 10":
-        stagioni_scelte = stagioni_disponibili[-10:]
+        stagioni_scelte = stagioni_disponibili[:10]
     else:
         stagioni_scelte = st.sidebar.multiselect(
             "Seleziona manualmente le stagioni:",
             options=stagioni_disponibili,
-            default=stagioni_disponibili,
+            default=stagioni_disponibili[:5],
             key="multiselect_stagioni_personalizzate",
         )
 
@@ -324,9 +303,9 @@ if "Data" in df.columns:
 # KPI rapidi
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Partite DB", f"{len(df):,}")
-if "country" in df: c2.metric("Campionati", df["country"].nunique())
-if "Home" in df: c3.metric("Squadre", pd.concat([df["Home"], df["Away"]]).nunique())
-if "Stagione" in df: c4.metric("Stagioni", df["Stagione"].nunique())
+if "country" in df.columns: c2.metric("Campionati", df["country"].nunique())
+if "Home" in df.columns: c3.metric("Squadre", pd.concat([df["Home"], df["Away"]]).nunique())
+if "Stagione" in df.columns: c4.metric("Stagioni", df["Stagione"].nunique())
 st.caption(f"Campionato selezionato: **{db_selected}**")
 
 # -------------------------------------------------------
