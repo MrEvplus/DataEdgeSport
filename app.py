@@ -39,7 +39,6 @@ def get_callable(mod, *names, label: str = ""):
             if n != names[0] and label:
                 st.info(f"ℹ️ In '{label}' uso fallback: `{n}`")
             return getattr(mod, n)
-    # diagnostica amichevole
     run_like = [a for a in dir(mod) if a.startswith("run") and callable(getattr(mod, a))]
     raise AttributeError(
         f"Nessuna delle funzioni {names} trovata nel modulo '{mod.__name__}'. "
@@ -76,10 +75,12 @@ run_macro_stats = get_callable(_macros, "run_macro_stats", label="macros")
 run_team_stats = get_callable(_squadre, "run_team_stats", label="squadre")
 run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
 run_correct_score_ev = get_callable(_correct_score_ev_sezione, "run_correct_score_ev", label="correct_score_ev_sezione")
-# LIVE: prova nomi alternativi se manca quello principale
+# LIVE: nome corretto + varianti
 run_live_minuto_analysis = get_callable(
     _analisi_live_minuto,
-    "run_live_minuto_analysis",
+    "run_live_minute_analysis",   # ✅ nome presente nel file
+    "run_live_minuto_analysis",   # variante italiana
+    "run_live_minute",
     "run_live_minuto",
     "run_live",
     "main",
@@ -110,10 +111,7 @@ _mappa_leghe_supabase = try_load_optional("mappa_leghe_supabase", "mappa_leghe_s
 # SUPPORTO
 # -------------------------------------------------------
 def get_league_mapping() -> dict:
-    """
-    Recupera (opzionalmente) la mappa code -> league_name da Supabase (tabella 'league_mapping').
-    Se il client non è disponibile o la tabella non esiste, ritorna {}.
-    """
+    """Recupera (opzionalmente) la mappa code -> league_name da Supabase."""
     try:
         if not create_client or not SUPABASE_URL or not SUPABASE_KEY:
             return {}
@@ -183,7 +181,6 @@ else:
 
 # -------------------------------------------------------
 # MAPPING COLONNE E PULIZIA
-# (allineiamo "Odd home" minuscolo per coerenza con utils.label_match)
 # -------------------------------------------------------
 col_map = {
     "country": "country",
@@ -201,7 +198,7 @@ col_map = {
     "place1a": "Posizione Classifica Home",
     "place2": "Posizione Classifica Away Generale",
     "place2d": "Posizione classifica away",
-    "cotaa": "Odd home",  # IMPORTANTE minuscolo
+    "cotaa": "Odd home",  # minuscolo per label_match
     "cotad": "Odd Away",
     "cotae": "Odd Draw",
     "cotao0": "Odd Over 0.5",
@@ -230,8 +227,8 @@ col_map = {
     "sutht1": "Tiri in Porta Home 1T",
     "sutht2": "Tiri in Porta Home 2T",
     "sutat": "Tiri in Porta Away FT",
-    "satat1": "Tiri in Porta Away 1T" if "satat1" in [] else "sutat1",
-    "satat2": "Tiri in Porta Away 2T" if "satat2" in [] else "sutat2",
+    "sutat1": "Tiri in Porta Away 1T",
+    "sutat2": "Tiri in Porta Away 2T",
     "mgolh": "Minuti Goal Home",
     "gh1": "Home Goal 1 (min)",
     "gh2": "Home Goal 2 (min)",
