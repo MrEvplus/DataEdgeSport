@@ -486,7 +486,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         		n = 1
                      seasons_selected = seasons_desc[:n]
 		else:  # "Tutte"
-    		     seasons_selected = []
+    		seasons_selected = []
 
             if seasons_selected:
                 st.caption(f"Stagioni attive: **{', '.join(seasons_selected)}**")
