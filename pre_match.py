@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 import altair as alt
 
+
+from datetime import date
 from squadre import compute_team_macro_stats, render_team_stats_tab
 from utils import label_match
 
@@ -110,6 +112,44 @@ def _season_sort_key(s: str) -> int:
 def _seasons_desc(unique_seasons: list) -> list[str]:
     arr = [str(x) for x in unique_seasons if pd.notna(x)]
     return sorted(arr, key=_season_sort_key, reverse=True)
+
+def _pick_current_season(seasons_desc: list[str]) -> list[str]:
+    """
+    Sceglie la stagione 'in corso' in base alla data odierna.
+    Logica EU: stagione = 1 luglio (sy) -> 30 giugno (ey).
+    Riconosce formati: 'YYYY/YYYY+1', 'YYYY-YYYY+1', 'YYYY/YY', 'YYYY-YY', 'YYYY'.
+    """
+    if not seasons_desc:
+        return []
+
+    today = date.today()
+    if today.month >= 7:   # lug-dic
+        sy, ey = today.year, today.year + 1
+    else:                  # gen-giu
+        sy, ey = today.year - 1, today.year
+
+    ey2 = str(ey)[-2:]
+    candidates = [
+        f"{sy}/{ey}", f"{sy}-{ey}",
+        f"{sy}/{ey2}", f"{sy}-{ey2}",
+        f"{sy}–{ey}",  f"{sy}–{ey2}",  # en dash
+        str(sy), str(ey)               # campionati anno solare
+    ]
+
+    # match esatto
+    for cand in candidates:
+        for s in seasons_desc:
+            if s.strip() == cand:
+                return [s]
+
+    # fallback 1: contiene sy o ey
+    for s in seasons_desc:
+        txt = s.strip()
+        if str(sy) in txt or str(ey) in txt:
+            return [s]
+
+    # fallback 2: la prima più recente
+    return seasons_desc[:1]
 
 
 # ==========================
@@ -438,12 +478,15 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                     key=_k("stagioni_preset"),
                 )
                 if preset == "Stagione in corso":
-                    seasons_selected = seasons_desc[:1] if seasons_desc else []
+                    seasons_selected = _pick_current_season(seasons_desc)
                 elif preset != "Tutte" and seasons_desc:
-                    n = int(preset.split()[-1])
-                    seasons_selected = seasons_desc[:n]
-                elif preset == "Tutte":
-                    seasons_selected = []
+		     try:
+                    	n = int(preset.split()[-1])
+    		     except Exception:
+        		n = 1
+                     seasons_selected = seasons_desc[:n]
+		else:  # "Tutte"
+    		     seasons_selected = []
 
             if seasons_selected:
                 st.caption(f"Stagioni attive: **{', '.join(seasons_selected)}**")
