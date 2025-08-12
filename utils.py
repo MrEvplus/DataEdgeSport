@@ -4,16 +4,21 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import streamlit as st
-import duckdb
 from typing import Iterable, Tuple, List
 
+# DuckDB opzionale: fallback a pandas/pyarrow se non disponibile
+try:
+    import duckdb  # type: ignore
+    _DUCKDB_OK = True
+except Exception:
+    duckdb = None  # type: ignore
+    _DUCKDB_OK = False
 
 # ---------------------------------------------------------------------
 # Secrets (niente credenziali hard-coded nel repo)
 # ---------------------------------------------------------------------
 SUPABASE_URL: str = st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY: str = st.secrets.get("SUPABASE_KEY", "")
-
 
 # ---------------------------------------------------------------------
 # Helper: accesso case-insensitive a colonne quota
@@ -25,13 +30,13 @@ def _get_odd(row: dict | pd.Series, *candidates: str) -> float | np.nan:
         if c in row and pd.notna(row[c]):
             return row[c]
     # 2) fallback case-insensitive
-    lower_map = {str(k).lower(): k for k in (row.keys() if isinstance(row, dict) else row.index)}
+    keys = row.keys() if isinstance(row, dict) else row.index
+    lower_map = {str(k).lower(): k for k in keys}
     for c in candidates:
         k = lower_map.get(c.lower())
         if k is not None and pd.notna(row[k]):
             return row[k]
     return np.nan
-
 
 # ---------------------------------------------------------------------
 # Label range in base alle quote (robusto ai casi Odd home/Odd Home)
@@ -71,7 +76,6 @@ def label_match(row: dict | pd.Series) -> str:
 
     return "Others"
 
-
 # ---------------------------------------------------------------------
 # Estrazione minuti goal da Serie di stringhe tipo "12;45;78" o "12,45"
 # ---------------------------------------------------------------------
@@ -100,10 +104,9 @@ def extract_minutes(series: pd.Series) -> List[int]:
                 pass
     return out
 
-
 # ---------------------------------------------------------------------
 # Loader Parquet via DuckDB+HTTPFS con filtro server-side e cache
-# (UI wrapper + funzione cache separata)
+# (UI wrapper + funzioni cache con fallback pandas)
 # ---------------------------------------------------------------------
 def load_data_from_supabase(
     parquet_label: str = "Parquet file URL (Supabase Storage):",
@@ -111,7 +114,7 @@ def load_data_from_supabase(
 ) -> Tuple[pd.DataFrame, str]:
     """
     Wrapper UI: chiede URL Parquet, campionato e stagioni.
-    Esegue poi un fetch *filtrato lato DuckDB* (no full-scan) con cache.
+    Esegue poi un fetch *filtrato* (DuckDB se disponibile, altrimenti pandas in memoria) con cache.
     Ritorna (df, campionato_selezionato).
     """
     st.sidebar.markdown("### 🌐 Origine: Supabase Storage (Parquet via DuckDB)")
@@ -120,7 +123,7 @@ def load_data_from_supabase(
         parquet_label,
         value=st.secrets.get(
             "PARQUET_URL",
-            "https://<TUO-PROGETTO>.supabase.co/storage/v1/object/public/partite.parquet/latest.parquet"
+            "https://<TUO-PROGETTO>.supabase.co/storage/v1/object/public/partite.parquet/latest.parquet",
         ),
         key=f"{selectbox_key}__url",
     ).strip()
@@ -144,7 +147,10 @@ def load_data_from_supabase(
     )
 
     if league != "Tutti" and "sezonul" in leagues_df.columns:
-        seasons_all = sorted(leagues_df.loc[leagues_df["country"].astype(str) == league, "sezonul"].dropna().astype(str).unique())
+        seasons_all = sorted(
+            leagues_df.loc[leagues_df["country"].astype(str) == league, "sezonul"]
+            .dropna().astype(str).unique()
+        )
     else:
         seasons_all = sorted(leagues_df["sezonul"].dropna().astype(str).unique()) if "sezonul" in leagues_df.columns else []
 
@@ -181,7 +187,8 @@ def load_data_from_supabase(
     for col in ("Odd home", "Odd Away", "Odd Draw"):
         if col in df.columns:
             df[col] = (
-                df[col].astype(str).str.replace(",", ".", regex=False).replace("nan", np.nan).astype(float)
+                df[col].astype(str).str.replace(",", ".", regex=False)
+                  .replace("nan", np.nan).astype(float)
             ).astype("Float32")
 
     for col in ("Home Goal FT", "Away Goal FT", "Home Goal 1T", "Away Goal 1T"):
@@ -200,41 +207,50 @@ def load_data_from_supabase(
     st.sidebar.write(f"✅ Righe caricate: {len(df):,}")
     return df, league
 
-
 @st.cache_data(show_spinner=False, ttl=900)
 def _read_parquet_filtered(parquet_url: str, league: str, seasons: Tuple[str, ...]) -> pd.DataFrame:
-    """Esegue la SELECT filtrata direttamente sul Parquet remoto via DuckDB+HTTPFS."""
-    con = duckdb.connect()
-    try:
-        con.execute("INSTALL httpfs; LOAD httpfs;")
-    except Exception:
-        # in alcuni ambienti httpfs è già disponibile o non installabile; proseguiamo
-        pass
+    """Legge il Parquet remoto applicando i filtri. DuckDB+HTTPFS se disponibile, altrimenti pandas in memoria."""
+    if _DUCKDB_OK:
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL httpfs; LOAD httpfs;")
+        except Exception:
+            pass
 
-    where = []
-    if league and league != "Tutti":
-        where.append(f"country = {duckdb.literal(league)}")
-    if seasons:
-        seasons_sql = ", ".join(duckdb.literal(s) for s in seasons)
-        where.append(f"sezonul IN ({seasons_sql})")
-    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+        where = []
+        if league and league != "Tutti":
+            where.append(f"country = {duckdb.literal(league)}")
+        if seasons:
+            seasons_sql = ", ".join(duckdb.literal(s) for s in seasons)
+            where.append(f"sezonul IN ({seasons_sql})")
+        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
-    query = f"SELECT * FROM read_parquet({duckdb.literal(parquet_url)}){where_sql}"
-    return con.execute(query).df()
-
+        query = f"SELECT * FROM read_parquet({duckdb.literal(parquet_url)}){where_sql}"
+        return con.execute(query).df()
+    else:
+        # Fallback: scarico e filtro localmente
+        df = pd.read_parquet(parquet_url, engine="pyarrow")
+        if league and league != "Tutti" and "country" in df.columns:
+            df = df[df["country"].astype(str) == league]
+        if seasons and "sezonul" in df.columns:
+            df = df[df["sezonul"].astype(str).isin(seasons)]
+        return df
 
 @st.cache_data(show_spinner=False, ttl=900)
 def _duckdb_select_distinct(parquet_url: str, cols: Iterable[str]) -> pd.DataFrame:
-    """Legge solo le colonne richieste e fa DISTINCT per minimizzare i bytes scaricati."""
+    """DISTINCT su poche colonne per popolare i menu. DuckDB se c’è, sennò pandas."""
     col_list = ", ".join(cols)
-    con = duckdb.connect()
-    try:
-        con.execute("INSTALL httpfs; LOAD httpfs;")
-    except Exception:
-        pass
-    q = f"SELECT DISTINCT {col_list} FROM read_parquet({duckdb.literal(parquet_url)})"
-    return con.execute(q).df()
-
+    if _DUCKDB_OK:
+        con = duckdb.connect()
+        try:
+            con.execute("INSTALL httpfs; LOAD httpfs;")
+        except Exception:
+            pass
+        q = f"SELECT DISTINCT {col_list} FROM read_parquet({duckdb.literal(parquet_url)})"
+        return con.execute(q).df()
+    else:
+        df = pd.read_parquet(parquet_url, engine="pyarrow", columns=list(cols))
+        return df.drop_duplicates(list(cols))
 
 # ---------------------------------------------------------------------
 # Upload manuale (CSV/XLSX) con pulizia minima e dtypes
@@ -267,7 +283,8 @@ def load_data_from_file() -> Tuple[pd.DataFrame, str]:
     for col in ("cotaa", "cotae", "cotad", "Odd home", "Odd Home", "Odd Away", "Odd Draw"):
         if col in df.columns:
             df[col] = (
-                df[col].astype(str).str.replace(",", ".", regex=False).replace("nan", np.nan).astype(float)
+                df[col].astype(str).str.replace(",", ".", regex=False)
+                  .replace("nan", np.nan).astype(float)
             )
 
     # Date se presenti
