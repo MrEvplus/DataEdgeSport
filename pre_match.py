@@ -378,6 +378,10 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         latest = seasons_desc[0] if seasons_desc else None
 
         with st.expander("⚙️ Filtro Stagioni", expanded=True):
+            st.markdown(
+                "Seleziona la profondità storica da analizzare. "
+                "**Intervallo rapido** applica un conteggio dalla stagione più recente verso il passato."
+            )
             colA, colB = st.columns([2, 1])
             with colA:
                 seasons_selected = st.multiselect(
@@ -385,7 +389,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                     options=seasons_desc,
                     default=[latest] if latest else [],
                     key=_k("stagioni_manual"),
-                    help="Puoi scegliere una o più stagioni. L'elenco è ordinato dalla più recente."
                 )
             with colB:
                 preset = st.selectbox(
@@ -393,7 +396,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                     options=["Tutte", "Ultime 10", "Ultime 5", "Ultime 3", "Ultime 2", "Ultime 1"],
                     index=0,
                     key=_k("stagioni_preset"),
-                    help="Applica un intervallo dalla stagione più recente verso il passato."
                 )
                 # Applica preset
                 if preset != "Tutte" and seasons_desc:
@@ -429,9 +431,17 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             if st.button("Assegna", key=_k("assign_btn"), use_container_width=True):
                 try:
                     if role == "Casa":
-                        st.session_state[_k("squadra_casa")] = selected_from_search
+                        other = st.session_state.get(_k("squadra_ospite"))
+                        if other == selected_from_search:
+                            st.warning("⚠️ La stessa squadra è già selezionata come Ospite. Cambia Ospite o usa 'Inverti'.")
+                        else:
+                            st.session_state[_k("squadra_casa")] = selected_from_search
                     else:
-                        st.session_state[_k("squadra_ospite")] = selected_from_search
+                        other = st.session_state.get(_k("squadra_casa"))
+                        if other == selected_from_search:
+                            st.warning("⚠️ La stessa squadra è già selezionata come Casa. Cambia Casa o usa 'Inverti'.")
+                        else:
+                            st.session_state[_k("squadra_ospite")] = selected_from_search
                     _set_qparams(q=team_filter or "")
                     try:
                         st.rerun()
@@ -440,20 +450,39 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 except Exception:
                     st.warning("Impossibile assegnare la squadra. Riprova.")
 
-    # ======== Selettori Squadre finali ========
+    # ======== Selettori Squadre finali + Swap rapido ========
     qp_home = qin.get("home") if isinstance(qin.get("home"), str) else (qin.get("home", [""])[0] if qin.get("home") else "")
     qp_away = qin.get("away") if isinstance(qin.get("away"), str) else (qin.get("away", [""])[0] if qin.get("away") else "")
 
     default_home = all_teams.index(qp_home) if qp_home in all_teams else 0
     default_away = all_teams.index(qp_away) if qp_away in all_teams else (1 if len(all_teams) > 1 else 0)
 
-    col_sel1, col_sel2 = st.columns(2)
+    col_sel1, col_swap, col_sel2 = st.columns([2, 0.5, 2])
     with col_sel1:
         squadra_casa = st.selectbox("Seleziona Squadra Casa", options=all_teams, index=default_home, key=_k("squadra_casa"))
+    with col_swap:
+        st.write("")
+        if st.button("🔁 Inverti", use_container_width=True, key=_k("swap")):
+            old_home = st.session_state.get(_k("squadra_casa"), squadra_casa)
+            old_away = st.session_state.get(_k("squadra_ospite"), all_teams[default_away])
+            st.session_state[_k("squadra_casa")] = old_away
+            st.session_state[_k("squadra_ospite")] = old_home
+            try:
+                st.rerun()
+            except Exception:
+                st.experimental_rerun()
     with col_sel2:
         squadra_ospite = st.selectbox("Seleziona Squadra Ospite", options=all_teams, index=default_away, key=_k("squadra_ospite"))
 
+    if squadra_casa == squadra_ospite:
+        st.error("❌ Casa e Ospite non possono essere la stessa squadra. Modifica la selezione o usa 'Inverti'.")
+        return
+
     # ======== Quote 1X2 per Label detection ========
+    st.markdown(
+        "Le quote servono per **classificare** il match in un *label* di equilibrio (es. H_Fav, A_Fav, Balanced), "
+        "utile per filtrare lo storico. Non sono usate per calcoli live."
+    )
     c1, c2, c3 = st.columns(3)
     with c1:
         odd_home = st.number_input("Quota Vincente Casa", min_value=1.01, step=0.01, value=float(qin.get("qh", 2.00)), key=_k("quota_home"))
@@ -464,10 +493,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     with c3:
         odd_away = st.number_input("Quota Vincente Ospite", min_value=1.01, step=0.01, value=float(qin.get("qa", 3.80)), key=_k("quota_away"))
         st.caption(f"Prob. Ospite ({squadra_ospite}): **{round(100/odd_away, 2)}%**")
-
-    if not (squadra_casa and squadra_ospite and squadra_casa != squadra_ospite):
-        st.info("Seleziona due squadre diverse per procedere.")
-        return
 
     label = _label_from_odds(float(odd_home), float(odd_away))
     label_type = _label_type(label)
@@ -489,6 +514,13 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     # TAB 1: 1X2 + macro KPI
     # ==========================
     with tab_1x2:
+        st.markdown(
+            "**Cosa vedi qui**: confronto 1X2 tra campionato/label e le due squadre nel loro contesto "
+            "(Casa per la squadra Home, Trasferta per la squadra Away). "
+            "**Win%** sono le frequenze storiche; **Back/Lay ROI** sono profitti medi per scommessa, "
+            "positivi verdi, negativi rossi."
+        )
+
         df_league_scope = df[df["Label"] == label] if label else df
         profits_back, rois_back, profits_lay, rois_lay, matches_league = _calc_back_lay_1x2(df_league_scope)
         league_stats = _league_data_by_label(df, label) if label else _league_data_by_label(df, _label_from_odds(2.0, 2.0))
@@ -584,14 +616,13 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             column_config={
                 "Matches": st.column_config.NumberColumn(format="%.0f"),
                 "Win %": st.column_config.NumberColumn(format="%.2f"),
-                "Back ROI %": st.column_config.TextColumn(help="ROI medio per scommessa (Back)"),
-                "Lay ROI %": st.column_config.TextColumn(help="ROI medio per scommessa (Lay)"),
             },
         )
         _download_df_button(df_long, "1x2_overview.csv", "⬇️ Scarica 1X2 CSV")
 
         st.divider()
         st.subheader("📌 Macro KPI Squadre")
+        st.markdown("Media goal fatti/subiti, esito 1X2 e BTTS% della squadra nel contesto **Home@Casa / Away@Trasferta**.")
         stats_home = compute_team_macro_stats(df, squadra_casa, "Home")
         stats_away = compute_team_macro_stats(df, squadra_ospite, "Away")
         if not stats_home or not stats_away:
@@ -602,10 +633,15 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             _download_df_button(df_comp.reset_index(), "macro_kpi.csv", "⬇️ Scarica Macro KPI CSV")
 
     # ==========================
-    # TAB 2: ROI mercati (campionato/label)
+    # TAB 2: ROI mercati (campionato/label + squadre)
     # ==========================
     with tab_roi:
-        st.caption("Calcolo ROI Back & Lay su Over 1.5, 2.5, 3.5 e BTTS (campionato/label)")
+        st.markdown(
+            "**Cosa vedi qui**: ROI storico per mercati **Over/BTTS**.\n\n"
+            "- **Scope Campionato/Label**: tutte le partite del campionato (o del label selezionato).\n"
+            "- **Scope Squadra**: partite della squadra Casa **giocate in Casa** e della squadra Ospite **giocate in Trasferta**.\n"
+            "I ROI sono calcolati come profitto medio per scommessa (commissione default 4.5%)."
+        )
         commission = 0.045
 
         df_ev_scope = df[df["Label"] == label].copy() if label else df.copy()
@@ -626,17 +662,34 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         with c4:
             q_btts = st.number_input("📥 Quota BTTS (fallback)", min_value=1.01, step=0.01, value=2.00, key=_k("q_btts"))
 
-        table_data = [
-            _calc_market_roi(df_ev_scope, "Over 1.5", OVER15_COLS, 1.5, commission, q_ov15),
-            _calc_market_roi(df_ev_scope, "Over 2.5", OVER25_COLS, 2.5, commission, q_ov25),
-            _calc_market_roi(df_ev_scope, "Over 3.5", OVER35_COLS, 3.5, commission, q_ov35),
-            _calc_market_roi(df_ev_scope, "BTTS", BTTS_YES_COLS, None, commission, q_btts),
-        ]
-        df_ev = pd.DataFrame(table_data)
+        def _roi_table_for(df_scope: pd.DataFrame, title: str) -> pd.DataFrame:
+            table_data = [
+                _calc_market_roi(df_scope, "Over 1.5", OVER15_COLS, 1.5, commission, q_ov15),
+                _calc_market_roi(df_scope, "Over 2.5", OVER25_COLS, 2.5, commission, q_ov25),
+                _calc_market_roi(df_scope, "Over 3.5", OVER35_COLS, 3.5, commission, q_ov35),
+                _calc_market_roi(df_scope, "BTTS", BTTS_YES_COLS, None, commission, q_btts),
+            ]
+            df_out = pd.DataFrame(table_data)
+            df_out.insert(0, "Scope", title)
+            return df_out
+
+        # Campionato / Label
+        df_roi_league = _roi_table_for(df_ev_scope, "Campionato/Label")
+
+        # Squadra Casa @ Casa
+        df_home_ctx = df[(df["Home"] == squadra_casa)].dropna(subset=["Home Goal FT", "Away Goal FT"]).copy()
+        df_roi_home = _roi_table_for(df_home_ctx, f"{squadra_casa} @Casa")
+
+        # Squadra Ospite @ Trasferta
+        df_away_ctx = df[(df["Away"] == squadra_ospite)].dropna(subset=["Home Goal FT", "Away Goal FT"]).copy()
+        df_roi_away = _roi_table_for(df_away_ctx, f"{squadra_ospite} @Trasferta")
+
+        df_roi_all = pd.concat([df_roi_league, df_roi_home, df_roi_away], ignore_index=True)
+
         st.dataframe(
-            df_ev,
+            df_roi_all,
             use_container_width=True,
-            height=360,
+            height=420,
             column_config={
                 "Quota Media": st.column_config.NumberColumn(format="%.2f"),
                 "Esiti %": st.column_config.TextColumn(),
@@ -645,21 +698,23 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 "Match Analizzati": st.column_config.NumberColumn(format="%.0f"),
             },
         )
-        _download_df_button(df_ev, "roi_markets.csv", "⬇️ Scarica ROI mercati CSV")
+        _download_df_button(df_roi_all, "roi_markets_all_scopes.csv", "⬇️ Scarica ROI mercati (tutti gli scope)")
 
     # ==========================
     # TAB 3: EV Storico – Squadre selezionate + KPI Best EV
     # ==========================
     with tab_ev:
-        st.caption("Probabilità storiche per Home@Casa, Away@Trasferta, Blended e H2H")
+        st.markdown(
+            "**Cosa vedi qui**: stime di Probabilità (%) dei mercati per i tre contesti:\n"
+            "- **Home@Casa**: partite della squadra di casa giocate in casa.\n"
+            "- **Away@Trasferta**: partite della squadra ospite giocate in trasferta.\n"
+            "- **Blended**: media semplice fra Home@Casa e Away@Trasferta (stabilizza la stima).\n"
+            "- **Head-to-Head**: scontri diretti fra le due squadre.\n\n"
+            "La colonna **Qualità** (BASSO/MEDIO/ALTO) indica la **solidità del campione** usato.\n"
+            "L'**EV** è calcolato come `quota * p - 1`. Un EV positivo è verde (potenziale overlay), negativo rosso."
+        )
         use_label = st.checkbox("Usa il filtro Label (se disponibile)", value=True if label else False, key=_k("use_label_ev_squadre"))
         last_n = st.slider("Limita agli ultimi N match (0 = tutti)", 0, 50, int(_get_qparams().get("n", 0) or 0), key=_k("last_n_ev"))
-
-        df_home_ctx = df[(df["Home"] == squadra_casa)].copy()
-        df_away_ctx = df[(df["Away"] == squadra_ospite)].copy()
-        if use_label and label:
-            df_home_ctx = df_home_ctx[df_home_ctx["Label"] == label]
-            df_away_ctx = df_away_ctx[df_away_ctx["Label"] == label]
 
         def _limit_last_n(df_in: pd.DataFrame, n: int) -> pd.DataFrame:
             if n and n > 0 and "Data" in df_in.columns:
@@ -669,6 +724,12 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 tmp = tmp.sort_values("_data_", ascending=False).drop(columns=["_data_"])
                 return tmp.head(n)
             return df_in
+
+        df_home_ctx = df[(df["Home"] == squadra_casa)].copy()
+        df_away_ctx = df[(df["Away"] == squadra_ospite)].copy()
+        if use_label and label:
+            df_home_ctx = df_home_ctx[df_home_ctx["Label"] == label]
+            df_away_ctx = df_away_ctx[df_away_ctx["Label"] == label]
 
         df_home_ctx = _limit_last_n(df_home_ctx.dropna(subset=["Home Goal FT", "Away Goal FT"]), last_n)
         df_away_ctx = _limit_last_n(df_away_ctx.dropna(subset=["Home Goal FT", "Away Goal FT"]), last_n)
