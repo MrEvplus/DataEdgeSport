@@ -4,15 +4,13 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import date
 
-# --- Import progetto (robusti) ---
+# --- Import progetto (robusti/optional) ---
 try:
-    from supabase import create_client  # opzionale: se assente non blocca l'app
+    from supabase import create_client
 except Exception:
     create_client = None
 
-# utils centralizza secrets, loader e label
 from utils import (
     SUPABASE_URL,
     SUPABASE_KEY,
@@ -21,26 +19,24 @@ from utils import (
     label_match,
 )
 
-# Moduli funzionali (manteniamo la struttura esistente)
+# Moduli di sezione (presenti nel repo)
 from macros import run_macro_stats
 from squadre import run_team_stats
 from pre_match import run_pre_match
 from correct_score_ev_sezione import run_correct_score_ev
-from analisi_live_minuto import run_live_minuto_analysis
+from analisi_live_minuto import run_live_minute_analysis
 from partite_del_giorno import run_partite_del_giorno
 from reverse_engineering import run_reverse_engineering
 
-# Moduli opzionali (se non ci sono, ignoriamo)
+# Moduli opzionali: se mancano non blocchiamo l’app
 try:
     from api_football_utils import get_fixtures_today_for_countries  # noqa: F401
 except Exception:
     pass
-
 try:
     from ai_inference import run_ai_inference  # noqa: F401
 except Exception:
     pass
-
 try:
     from mappa_leghe_supabase import run_mappa_leghe_supabase  # noqa: F401
 except Exception:
@@ -48,12 +44,12 @@ except Exception:
 
 
 # -------------------------------------------------------
-# FUNZIONI DI SUPPORTO
+# SUPPORTO
 # -------------------------------------------------------
 def get_league_mapping() -> dict:
     """
-    Recupera (opzionalmente) la mappa codice->nome lega da Supabase.
-    Se supabase client o tabella non disponibili, ritorna dict vuoto.
+    Recupera (opzionalmente) la mappa code -> league_name da Supabase.
+    Se il client non è disponibile o la tabella non esiste, ritorna {}.
     """
     try:
         if not create_client or not SUPABASE_URL or not SUPABASE_KEY:
@@ -103,6 +99,7 @@ menu_option = st.sidebar.radio(
 origine_dati = st.sidebar.radio("Seleziona origine dati:", ["Supabase", "Upload Manuale"], key="origine_dati")
 
 if origine_dati == "Supabase":
+    # key personalizzata per evitare conflitti con altri selectbox
     df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase")
 else:
     df, db_selected = load_data_from_file()
@@ -126,8 +123,8 @@ else:
         st.session_state["campionato_corrente"] = db_selected
 
 # -------------------------------------------------------
-# MAPPING COLONNE COMPLETO E PULIZIA
-# (nota: allineiamo "Odd home" minuscolo per coerenza con label_match in utils.py)
+# MAPPING COLONNE E PULIZIA
+# (allineiamo "Odd home" minuscolo per coerenza con utils.label_match)
 # -------------------------------------------------------
 col_map = {
     "country": "country",
@@ -145,7 +142,7 @@ col_map = {
     "place1a": "Posizione Classifica Home",
     "place2": "Posizione Classifica Away Generale",
     "place2d": "Posizione classifica away",
-    # *** IMPORTANTE: usare "Odd home" coerente con utils.label_match ***
+    # IMPORTANTE: "Odd home" minuscolo
     "cotaa": "Odd home",
     "cotad": "Odd Away",
     "cotae": "Odd Draw",
@@ -201,11 +198,9 @@ col_map = {
     "codechipa1": "CodeChipa1",
     "codechipa2": "CodeChipa2",
 }
-
-# rename sicuro (se alcune colonne non esistono, pandas ignora)
 df = df.rename(columns=col_map)
 
-# normalizzazione leggera dei nomi
+# Normalizzazione leggera dei nomi
 df.columns = (
     df.columns.astype(str)
     .str.strip()
@@ -213,16 +208,15 @@ df.columns = (
     .str.replace(r"\s+", " ", regex=True)
 )
 
-# Etichetta "Label" (se manca). Usa label_match riga per riga (coerenza con progetti esistenti).
+# Etichetta "Label" se manca
 if "Label" not in df.columns:
-    # Per evitare errori se le quote mancano:
-    if not set(["Odd home", "Odd Away"]).issubset(df.columns):
-        df["Label"] = "Others"
-    else:
+    if {"Odd home", "Odd Away"}.issubset(df.columns):
         df["Label"] = df.apply(label_match, axis=1)
+    else:
+        df["Label"] = "Others"
 
 # -------------------------------------------------------
-# FILTRO STAGIONI (Scorciatoie + Personalizza)
+# FILTRO STAGIONI (preset + personalizza)
 # -------------------------------------------------------
 if "Stagione" in df.columns:
     stagioni_disponibili = sorted(df["Stagione"].dropna().astype(str).unique())
@@ -243,7 +237,7 @@ if "Stagione" in df.columns:
         stagioni_scelte = stagioni_disponibili[-10:]
     else:
         stagioni_scelte = st.sidebar.multiselect(
-            "Seleziona manualmente le stagioni da includere:",
+            "Seleziona manualmente le stagioni:",
             options=stagioni_disponibili,
             default=stagioni_disponibili,
             key="multiselect_stagioni_personalizzate",
@@ -253,7 +247,7 @@ if "Stagione" in df.columns:
         df = df[df["Stagione"].astype(str).isin(stagioni_scelte)]
 
 # -------------------------------------------------------
-# INFO DATASET E GUARD-RAIL
+# INFO DATASET & GUARD-RAIL
 # -------------------------------------------------------
 with st.expander("✅ Colonne presenti nel dataset", expanded=False):
     st.write(list(df.columns))
@@ -266,21 +260,18 @@ if "Home" not in df.columns or "Away" not in df.columns:
     st.error("⚠️ Colonne 'Home' e/o 'Away' mancanti nel dataset selezionato.")
     st.stop()
 
-# Se c'è "Data", ripulisci e mostra solo partite fino ad oggi (niente future)
+# Se c'è "Data", rimuovi partite future
 if "Data" in df.columns:
     df["Data"] = _safe_to_datetime(df["Data"])
     today = pd.Timestamp.today().normalize()
     df = df[(df["Data"].isna()) | (df["Data"] <= today)]
 
-# -------------------------------------------------------
-# KPI RAPIDI (facoltativi, non invasivi)
-# -------------------------------------------------------
+# KPI rapidi
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Partite DB", f"{len(df):,}")
 if "country" in df: c2.metric("Campionati", df["country"].nunique())
 if "Home" in df: c3.metric("Squadre", pd.concat([df["Home"], df["Away"]]).nunique())
 if "Stagione" in df: c4.metric("Stagioni", df["Stagione"].nunique())
-
 st.caption(f"Campionato selezionato: **{db_selected}**")
 
 # -------------------------------------------------------
@@ -299,7 +290,7 @@ elif menu_option == "Correct Score EV":
     run_correct_score_ev(df, db_selected)
 
 elif menu_option == "Analisi Live da Minuto":
-    run_live_minuto_analysis(df)
+    run_live_minute_analysis(df)
 
 elif menu_option == "Partite del Giorno":
     run_partite_del_giorno(df, db_selected)
