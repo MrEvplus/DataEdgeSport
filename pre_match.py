@@ -898,11 +898,11 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         ov15=shared["ov15"], ov25=shared["ov25"], ov35=shared["ov35"], btts=shared["btts"],
     )
 
-with tab_correct_score:
-    run_correct_score_panel(
-        df=df_league_all,                 # stesso df che usi nelle altre sezioni
-        league_code=league,               # es. db_selected upper
-        home_team=squadra_casa,
-        away_team=squadra_ospite,
-        seasons=seasons_selected or None  # se vuoi filtrare come la pagina
-    )
+    with tab_correct_score:
+                   run_correct_score_panel(
+        		df=df_league_all,                 # stesso df che usi nelle altre sezioni
+        		league_code=league,               # es. db_selected upper
+        		home_team=squadra_casa,
+        		away_team=squadra_ospite,
+        		seasons=seasons_selected or None  # se vuoi filtrare come la pagina
+  	  )
