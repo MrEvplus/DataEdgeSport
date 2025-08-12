@@ -20,6 +20,9 @@ except Exception as e:
     st.error(f"Errore nell'import di utils.py: {type(e).__name__} - {e}")
     st.stop()
 
+# 🔧 FIX ANTI-CONFLITTO: forza tutti i "import utils" a usare questo file
+sys.modules["utils"] = _utils
+
 # ora prendo i simboli che mi servono
 SUPABASE_URL = getattr(_utils, "SUPABASE_URL", "")
 SUPABASE_KEY = getattr(_utils, "SUPABASE_KEY", "")
