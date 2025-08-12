@@ -217,16 +217,24 @@ def _read_parquet_filtered(parquet_url: str, league: str, seasons: Tuple[str, ..
         except Exception:
             pass
 
+        # Query parametrizzata (niente duckdb.literal)
+        params: list = [parquet_url]
+        q = "SELECT * FROM read_parquet(?)"
         where = []
-        if league and league != "Tutti":
-            where.append(f"country = {duckdb.literal(league)}")
-        if seasons:
-            seasons_sql = ", ".join(duckdb.literal(s) for s in seasons)
-            where.append(f"sezonul IN ({seasons_sql})")
-        where_sql = (" WHERE " + " AND ".join(where)) if where else ""
 
-        query = f"SELECT * FROM read_parquet({duckdb.literal(parquet_url)}){where_sql}"
-        return con.execute(query).df()
+        if league and league != "Tutti":
+            where.append("country = ?")
+            params.append(league)
+
+        if seasons:
+            placeholders = ",".join(["?"] * len(seasons))
+            where.append(f"sezonul IN ({placeholders})")
+            params.extend(list(seasons))
+
+        if where:
+            q += " WHERE " + " AND ".join(where)
+
+        return con.execute(q, params).df()
     else:
         # Fallback: scarico e filtro localmente
         df = pd.read_parquet(parquet_url, engine="pyarrow")
@@ -246,8 +254,9 @@ def _duckdb_select_distinct(parquet_url: str, cols: Iterable[str]) -> pd.DataFra
             con.execute("INSTALL httpfs; LOAD httpfs;")
         except Exception:
             pass
-        q = f"SELECT DISTINCT {col_list} FROM read_parquet({duckdb.literal(parquet_url)})"
-        return con.execute(q).df()
+        # Parametrizzata: read_parquet(?)
+        q = f"SELECT DISTINCT {col_list} FROM read_parquet(?)"
+        return con.execute(q, [parquet_url]).df()
     else:
         df = pd.read_parquet(parquet_url, engine="pyarrow", columns=list(cols))
         return df.drop_duplicates(list(cols))
