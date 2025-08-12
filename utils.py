@@ -210,56 +210,76 @@ def load_data_from_supabase(
 @st.cache_data(show_spinner=False, ttl=900)
 def _read_parquet_filtered(parquet_url: str, league: str, seasons: Tuple[str, ...]) -> pd.DataFrame:
     """Legge il Parquet remoto applicando i filtri. DuckDB+HTTPFS se disponibile, altrimenti pandas in memoria."""
+    # Prova via DuckDB
     if _DUCKDB_OK:
-        con = duckdb.connect()
         try:
-            con.execute("INSTALL httpfs; LOAD httpfs;")
+            con = duckdb.connect()
+            httpfs_ok = False
+            try:
+                con.execute("INSTALL httpfs; LOAD httpfs;")
+                httpfs_ok = True
+            except Exception:
+                httpfs_ok = False
+
+            # Se è URL HTTP/S ma httpfs non è disponibile -> fallback
+            if parquet_url.startswith(("http://", "https://")) and not httpfs_ok:
+                raise RuntimeError("HTTPFS non disponibile: fallback a pandas")
+
+            # Query parametrizzata
+            params: list = [parquet_url]
+            q = "SELECT * FROM read_parquet(?)"
+            where = []
+
+            if league and league != "Tutti":
+                where.append("country = ?")
+                params.append(league)
+
+            if seasons:
+                placeholders = ",".join(["?"] * len(seasons))
+                where.append(f"sezonul IN ({placeholders})")
+                params.extend(list(seasons))
+
+            if where:
+                q += " WHERE " + " AND ".join(where)
+
+            return con.execute(q, params).df()
         except Exception:
+            # Qualsiasi errore con DuckDB -> fallback pandas
             pass
 
-        # Query parametrizzata (niente duckdb.literal)
-        params: list = [parquet_url]
-        q = "SELECT * FROM read_parquet(?)"
-        where = []
-
-        if league and league != "Tutti":
-            where.append("country = ?")
-            params.append(league)
-
-        if seasons:
-            placeholders = ",".join(["?"] * len(seasons))
-            where.append(f"sezonul IN ({placeholders})")
-            params.extend(list(seasons))
-
-        if where:
-            q += " WHERE " + " AND ".join(where)
-
-        return con.execute(q, params).df()
-    else:
-        # Fallback: scarico e filtro localmente
-        df = pd.read_parquet(parquet_url, engine="pyarrow")
-        if league and league != "Tutti" and "country" in df.columns:
-            df = df[df["country"].astype(str) == league]
-        if seasons and "sezonul" in df.columns:
-            df = df[df["sezonul"].astype(str).isin(seasons)]
-        return df
+    # Fallback pandas/pyarrow (funziona su HTTPS pubblici)
+    df = pd.read_parquet(parquet_url, engine="pyarrow")
+    if league and league != "Tutti" and "country" in df.columns:
+        df = df[df["country"].astype(str) == league]
+    if seasons and "sezonul" in df.columns:
+        df = df[df["sezonul"].astype(str).isin(seasons)]
+    return df
 
 @st.cache_data(show_spinner=False, ttl=900)
 def _duckdb_select_distinct(parquet_url: str, cols: Iterable[str]) -> pd.DataFrame:
     """DISTINCT su poche colonne per popolare i menu. DuckDB se c’è, sennò pandas."""
     col_list = ", ".join(cols)
     if _DUCKDB_OK:
-        con = duckdb.connect()
         try:
-            con.execute("INSTALL httpfs; LOAD httpfs;")
+            con = duckdb.connect()
+            httpfs_ok = False
+            try:
+                con.execute("INSTALL httpfs; LOAD httpfs;")
+                httpfs_ok = True
+            except Exception:
+                httpfs_ok = False
+
+            if parquet_url.startswith(("http://", "https://")) and not httpfs_ok:
+                raise RuntimeError("HTTPFS non disponibile: fallback a pandas")
+
+            q = f"SELECT DISTINCT {col_list} FROM read_parquet(?)"
+            return con.execute(q, [parquet_url]).df()
         except Exception:
+            # qualsiasi errore -> pandas
             pass
-        # Parametrizzata: read_parquet(?)
-        q = f"SELECT DISTINCT {col_list} FROM read_parquet(?)"
-        return con.execute(q, [parquet_url]).df()
-    else:
-        df = pd.read_parquet(parquet_url, engine="pyarrow", columns=list(cols))
-        return df.drop_duplicates(list(cols))
+
+    df = pd.read_parquet(parquet_url, engine="pyarrow", columns=list(cols))
+    return df.drop_duplicates(list(cols))
 
 # ---------------------------------------------------------------------
 # Upload manuale (CSV/XLSX) con pulizia minima e dtypes
