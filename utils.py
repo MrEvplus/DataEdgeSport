@@ -1,69 +1,163 @@
+# utils.py
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 import duckdb
+from typing import Iterable, Tuple, List
 
-# ----------------------------------------------------------
-# Variabili di connessione Supabase (rimosse da versione pubblica)
-# ----------------------------------------------------------
-# Inserire in .streamlit/secrets.toml oppure in variabili d'ambiente
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "")
 
-# ----------------------------------------------------------
-# Caricamento da DuckDB + Parquet su Supabase Storage
-# ----------------------------------------------------------
-def load_data_from_supabase(parquet_label="Parquet file URL (Supabase Storage):", selectbox_key="selectbox_campionato_duckdb"):
+# ---------------------------------------------------------------------
+# Secrets (niente credenziali hard-coded nel repo)
+# ---------------------------------------------------------------------
+SUPABASE_URL: str = st.secrets.get("SUPABASE_URL", "")
+SUPABASE_KEY: str = st.secrets.get("SUPABASE_KEY", "")
+
+
+# ---------------------------------------------------------------------
+# Helper: accesso case-insensitive a colonne quota
+# ---------------------------------------------------------------------
+def _get_odd(row: dict | pd.Series, *candidates: str) -> float | np.nan:
+    """Ritorna il primo valore disponibile tra i nomi colonna candidati (case-insensitive)."""
+    # 1) match diretto
+    for c in candidates:
+        if c in row and pd.notna(row[c]):
+            return row[c]
+    # 2) fallback case-insensitive
+    lower_map = {str(k).lower(): k for k in (row.keys() if isinstance(row, dict) else row.index)}
+    for c in candidates:
+        k = lower_map.get(c.lower())
+        if k is not None and pd.notna(row[k]):
+            return row[k]
+    return np.nan
+
+
+# ---------------------------------------------------------------------
+# Label range in base alle quote (robusto ai casi Odd home/Odd Home)
+# ---------------------------------------------------------------------
+def label_match(row: dict | pd.Series) -> str:
+    """
+    Classifica il match in una fascia di quote in base a 'Odd home'/'Odd Home' e 'Odd Away'/'Odd away'.
+    """
+    try:
+        h = float(_get_odd(row, "Odd home", "Odd Home"))
+        a = float(_get_odd(row, "Odd Away", "Odd away"))
+    except Exception:
+        return "Others"
+
+    if np.isnan(h) or np.isnan(a):
+        return "Others"
+
+    # SuperCompetitive
+    if h <= 3 and a <= 3:
+        return "SuperCompetitive H<=3 A<=3"
+
+    # Classificazione Home
+    if h < 1.5:
+        return "H_StrongFav <1.5"
+    if 1.5 <= h <= 2:
+        return "H_MediumFav 1.5-2"
+    if 2 < h <= 3:
+        return "H_SmallFav 2-3"
+
+    # Classificazione Away
+    if a < 1.5:
+        return "A_StrongFav <1.5"
+    if 1.5 <= a <= 2:
+        return "A_MediumFav 1.5-2"
+    if 2 < a <= 3:
+        return "A_SmallFav 2-3"
+
+    return "Others"
+
+
+# ---------------------------------------------------------------------
+# Estrazione minuti goal da Serie di stringhe tipo "12;45;78" o "12,45"
+# ---------------------------------------------------------------------
+def extract_minutes(series: pd.Series) -> List[int]:
+    """
+    Estrae i minuti di goal da una Serie (stringhe tipo '12; 45; 78' o '12,45').
+    Ignora valori nulli, vuoti e non numerici. Ritorna una lista di interi.
+    """
+    if series is None or len(series) == 0:
+        return []
+    series = series.fillna("").astype(str)
+
+    out: List[int] = []
+    for val in series:
+        s = val.strip().replace(",", ";")
+        if s in ("", ";"):
+            continue
+        for part in s.split(";"):
+            p = part.strip()
+            if not p:
+                continue
+            try:
+                out.append(int(float(p)))
+            except Exception:
+                # ignora scarti
+                pass
+    return out
+
+
+# ---------------------------------------------------------------------
+# Loader Parquet via DuckDB+HTTPFS con filtro server-side e cache
+# (UI wrapper + funzione cache separata)
+# ---------------------------------------------------------------------
+def load_data_from_supabase(
+    parquet_label: str = "Parquet file URL (Supabase Storage):",
+    selectbox_key: str = "selectbox_campionato_duckdb",
+) -> Tuple[pd.DataFrame, str]:
+    """
+    Wrapper UI: chiede URL Parquet, campionato e stagioni.
+    Esegue poi un fetch *filtrato lato DuckDB* (no full-scan) con cache.
+    Ritorna (df, campionato_selezionato).
+    """
     st.sidebar.markdown("### 🌐 Origine: Supabase Storage (Parquet via DuckDB)")
 
-    parquet_url = st.sidebar.text_input(
+    parquet_url: str = st.sidebar.text_input(
         parquet_label,
-        value=st.secrets.get("SUPABASE_PARQUET_URL", "")
-    )
+        value=st.secrets.get(
+            "PARQUET_URL",
+            "https://<TUO-PROGETTO>.supabase.co/storage/v1/object/public/partite.parquet/latest.parquet"
+        ),
+        key=f"{selectbox_key}__url",
+    ).strip()
 
-    query_all = f"SELECT * FROM read_parquet('{parquet_url}')"
-
-    try:
-        df_all = duckdb.query(query_all).to_df()
-    except Exception as e:
-        st.error(f"❌ Errore DuckDB: {str(e)}")
+    if not parquet_url:
+        st.warning("Inserisci l'URL del Parquet in Supabase Storage.")
         st.stop()
 
-    if df_all.empty:
+    # Carico SOLO meta per popolare i menu (campionati/stagioni)
+    leagues_df = _duckdb_select_distinct(parquet_url, cols=("country", "sezonul"))
+    if leagues_df.empty:
         st.warning("⚠️ Nessun dato trovato nel Parquet.")
         st.stop()
 
-    # Lista campionati
-    campionati_disponibili = sorted(df_all["country"].dropna().unique()) if "country" in df_all.columns else []
-
-    campionato_scelto = st.sidebar.selectbox(
+    leagues = sorted(leagues_df["country"].dropna().astype(str).unique()) if "country" in leagues_df.columns else []
+    league = st.sidebar.selectbox(
         "Seleziona Campionato:",
-        ["Tutti"] + campionati_disponibili,
-        index=1 if campionati_disponibili else 0,
-        key=selectbox_key
+        ["Tutti"] + leagues,
+        index=1 if leagues else 0,
+        key=selectbox_key,
     )
 
-    if not campionato_scelto:
-        st.info("ℹ️ Seleziona un campionato per procedere.")
-        st.stop()
+    if league != "Tutti" and "sezonul" in leagues_df.columns:
+        seasons_all = sorted(leagues_df.loc[leagues_df["country"].astype(str) == league, "sezonul"].dropna().astype(str).unique())
+    else:
+        seasons_all = sorted(leagues_df["sezonul"].dropna().astype(str).unique()) if "sezonul" in leagues_df.columns else []
 
-    # Filtra campionato
-    df_filtered = df_all if campionato_scelto == "Tutti" else df_all[df_all["country"] == campionato_scelto]
-
-    # Lista stagioni
-    stagioni_disponibili = sorted(df_filtered["sezonul"].dropna().unique()) if "sezonul" in df_filtered.columns else []
-
-    stagioni_scelte = st.sidebar.multiselect(
-        "Seleziona le stagioni:",
-        options=stagioni_disponibili,
-        default=stagioni_disponibili,
-        key="multiselect_stagioni_duckdb"
+    seasons_sel = st.sidebar.multiselect(
+        "Seleziona stagioni:",
+        options=seasons_all,
+        default=seasons_all,
+        key=f"{selectbox_key}__seasons",
     )
 
-    if stagioni_scelte:
-        df_filtered = df_filtered[df_filtered["sezonul"].isin(stagioni_scelte)]
+    df = _read_parquet_filtered(parquet_url, league, tuple(seasons_sel))
 
-    # Mappatura colonne
+    # Mapping canonico essenziale (se arrivano colonne grezze)
     col_map = {
         "country": "country",
         "sezonul": "Stagione",
@@ -77,125 +171,141 @@ def load_data_from_supabase(parquet_label="Parquet file URL (Supabase Storage):"
         "cotad": "Odd Away",
         "cotae": "Odd Draw",
         "mgolh": "minuti goal segnato home",
-        "mgola": "minuti goal segnato away"
+        "mgola": "minuti goal segnato away",
+        "datameci": "Data",
+        "orameci": "Orario",
     }
-    df_filtered.rename(columns=col_map, inplace=True)
+    df = df.rename(columns=col_map)
 
-    # Pulizia valori numerici
-    for col in df_filtered.columns:
-        if df_filtered[col].dtype == object:
-            df_filtered[col] = df_filtered[col].str.replace(",", ".")
-    df_filtered = df_filtered.apply(pd.to_numeric, errors="ignore")
+    # Cast mirati e dtypes stretti
+    for col in ("Odd home", "Odd Away", "Odd Draw"):
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str).str.replace(",", ".", regex=False).replace("nan", np.nan).astype(float)
+            ).astype("Float32")
 
-    # Conversione date
-    if "Data" in df_filtered.columns:
-        df_filtered["Data"] = pd.to_datetime(df_filtered["Data"], errors="coerce")
+    for col in ("Home Goal FT", "Away Goal FT", "Home Goal 1T", "Away Goal 1T"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int16")
 
-    st.sidebar.success(f"✅ Righe caricate: {len(df_filtered)}")
-    return df_filtered, campionato_scelto
+    if "country" in df.columns:
+        df["country"] = df["country"].astype("category")
+    if "Home" in df.columns:
+        df["Home"] = df["Home"].astype("category")
+    if "Away" in df.columns:
+        df["Away"] = df["Away"].astype("category")
+    if "Data" in df.columns:
+        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
 
-# ----------------------------------------------------------
-# Upload Manuale (Excel o CSV)
-# ----------------------------------------------------------
-def load_data_from_file():
+    st.sidebar.write(f"✅ Righe caricate: {len(df):,}")
+    return df, league
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def _read_parquet_filtered(parquet_url: str, league: str, seasons: Tuple[str, ...]) -> pd.DataFrame:
+    """Esegue la SELECT filtrata direttamente sul Parquet remoto via DuckDB+HTTPFS."""
+    con = duckdb.connect()
+    try:
+        con.execute("INSTALL httpfs; LOAD httpfs;")
+    except Exception:
+        # in alcuni ambienti httpfs è già disponibile o non installabile; proseguiamo
+        pass
+
+    where = []
+    if league and league != "Tutti":
+        where.append(f"country = {duckdb.literal(league)}")
+    if seasons:
+        seasons_sql = ", ".join(duckdb.literal(s) for s in seasons)
+        where.append(f"sezonul IN ({seasons_sql})")
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+
+    query = f"SELECT * FROM read_parquet({duckdb.literal(parquet_url)}){where_sql}"
+    return con.execute(query).df()
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def _duckdb_select_distinct(parquet_url: str, cols: Iterable[str]) -> pd.DataFrame:
+    """Legge solo le colonne richieste e fa DISTINCT per minimizzare i bytes scaricati."""
+    col_list = ", ".join(cols)
+    con = duckdb.connect()
+    try:
+        con.execute("INSTALL httpfs; LOAD httpfs;")
+    except Exception:
+        pass
+    q = f"SELECT DISTINCT {col_list} FROM read_parquet({duckdb.literal(parquet_url)})"
+    return con.execute(q).df()
+
+
+# ---------------------------------------------------------------------
+# Upload manuale (CSV/XLSX) con pulizia minima e dtypes
+# ---------------------------------------------------------------------
+def load_data_from_file() -> Tuple[pd.DataFrame, str]:
     st.sidebar.markdown("### 📂 Origine: Upload Manuale")
 
     uploaded_file = st.sidebar.file_uploader(
         "Carica il tuo file Excel o CSV:",
         type=["xls", "xlsx", "csv"],
-        key="file_uploader_upload"
+        key="file_uploader_upload",
     )
 
     if uploaded_file is None:
         st.info("ℹ️ Carica un file per continuare.")
         st.stop()
 
-    if uploaded_file.name.endswith(".csv"):
+    # Riconosci CSV o Excel
+    if uploaded_file.name.lower().endswith(".csv"):
         df = pd.read_csv(uploaded_file)
     else:
         xls = pd.ExcelFile(uploaded_file)
-        df = pd.read_excel(xls, sheet_name=xls.sheet_names[0])
+        sheet_name = xls.sheet_names[0]
+        df = pd.read_excel(xls, sheet_name=sheet_name)
 
-    # Pulizia colonne
-    df.columns = df.columns.str.strip().str.lower()
-    for col in df.columns:
-        if df[col].dtype == object:
-            df[col] = df[col].str.replace(",", ".")
-    df = df.apply(pd.to_numeric, errors="ignore")
+    # Normalizzazione basilare
+    df.columns = df.columns.astype(str).str.strip()
 
-    if "datameci" in df.columns:
-        df["datameci"] = pd.to_datetime(df["datameci"], errors="coerce")
+    # Cast quote note se presenti
+    for col in ("cotaa", "cotae", "cotad", "Odd home", "Odd Home", "Odd Away", "Odd Draw"):
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str).str.replace(",", ".", regex=False).replace("nan", np.nan).astype(float)
+            )
 
-    campionati_disponibili = sorted(df["country"].dropna().unique()) if "country" in df.columns else []
+    # Date se presenti
+    for dcol in ("datameci", "Data"):
+        if dcol in df.columns:
+            df[dcol] = pd.to_datetime(df[dcol], errors="coerce")
 
-    campionato_scelto = st.sidebar.selectbox(
+    # Selezione campionato
+    if "country" in df.columns:
+        leagues = sorted(df["country"].dropna().astype(str).unique())
+    else:
+        leagues = []
+
+    league = st.sidebar.selectbox(
         "Seleziona Campionato:",
-        ["Tutti"] + campionati_disponibili,
-        key="selectbox_campionato_upload"
+        ["Tutti"] + leagues,
+        index=1 if leagues else 0,
+        key="selectbox_campionato_upload",
     )
 
-    if not campionato_scelto:
-        st.info("ℹ️ Seleziona un campionato per procedere.")
-        st.stop()
+    df_filtered = df.copy()
+    if league != "Tutti" and "country" in df.columns:
+        df_filtered = df[df["country"].astype(str) == league]
 
-    df_filtered = df if campionato_scelto == "Tutti" else df[df["country"] == campionato_scelto]
+    if "sezonul" in df_filtered.columns:
+        seasons_all = sorted(df_filtered["sezonul"].dropna().astype(str).unique())
+    else:
+        seasons_all = []
 
-    stagioni_disponibili = sorted(df_filtered["sezonul"].dropna().unique()) if "sezonul" in df_filtered.columns else []
-    stagioni_scelte = st.sidebar.multiselect(
+    seasons_sel = st.sidebar.multiselect(
         "Seleziona le stagioni:",
-        options=stagioni_disponibili,
-        default=stagioni_disponibili,
-        key="multiselect_stagioni_upload"
+        options=seasons_all,
+        default=seasons_all,
+        key="multiselect_stagioni_upload",
     )
 
-    if stagioni_scelte:
-        df_filtered = df_filtered[df_filtered["sezonul"].isin(stagioni_scelte)]
+    if seasons_sel and "sezonul" in df_filtered.columns:
+        df_filtered = df_filtered[df_filtered["sezonul"].astype(str).isin(seasons_sel)]
 
-    st.sidebar.success(f"✅ Righe caricate: {len(df_filtered)}")
-    return df_filtered, campionato_scelto
-
-# ----------------------------------------------------------
-# Classificazione match per quota
-# ----------------------------------------------------------
-def label_match(row):
-    try:
-        h = float(row.get("Odd home", np.nan))
-        a = float(row.get("Odd Away", np.nan))
-    except:
-        return "Others"
-
-    if np.isnan(h) or np.isnan(a):
-        return "Others"
-
-    if h <= 3 and a <= 3:
-        return "SuperCompetitive H<=3 A<=3"
-    if h < 1.5:
-        return "H_StrongFav <1.5"
-    elif h <= 2:
-        return "H_MediumFav 1.5-2"
-    elif h <= 3:
-        return "H_SmallFav 2-3"
-    if a < 1.5:
-        return "A_StrongFav <1.5"
-    elif a <= 2:
-        return "A_MediumFav 1.5-2"
-    elif a <= 3:
-        return "A_SmallFav 2-3"
-    return "Others"
-
-# ----------------------------------------------------------
-# Estrazione minuti goal
-# ----------------------------------------------------------
-def extract_minutes(series):
-    all_minutes = []
-    series = series.fillna("")
-    for val in series:
-        val = str(val).strip()
-        if not val or val == ";":
-            continue
-        parts = val.replace(",", ";").split(";")
-        for part in parts:
-            part = part.strip()
-            if part.replace(".", "", 1).isdigit():
-                all_minutes.append(int(float(part)))
-    return all_minutes
+    st.sidebar.write(f"✅ Righe caricate da Upload Manuale: {len(df_filtered):,}")
+    return df_filtered, league
