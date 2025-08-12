@@ -7,8 +7,9 @@ import pandas as pd
 import numpy as np
 import altair as alt
 
-from squadre import compute_team_macro_stats
+from squadre import compute_team_macro_stats, render_team_stats_tab
 from utils import label_match
+
 
 # ==========================
 # Altair Theme (globale)
@@ -28,6 +29,7 @@ try:
     alt.themes.enable("app_theme")
 except Exception:
     pass
+
 
 # ==========================
 # Helper generali
@@ -49,6 +51,9 @@ def _coerce_float(s: pd.Series) -> pd.Series:
     if s is None:
         return pd.Series(dtype="float")
     return pd.to_numeric(_ensure_str(s).str.replace(",", ".", regex=False), errors="coerce")
+
+def _coerce_int_series(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").astype("Int64")
 
 def _first_present(cols: list[str], columns: pd.Index) -> str | None:
     for c in cols:
@@ -109,87 +114,100 @@ def _seasons_desc(unique_seasons: list) -> list[str]:
     arr = [str(x) for x in unique_seasons if pd.notna(x)]
     return sorted(arr, key=_season_sort_key, reverse=True)
 
+
 # ==========================
-# League data by Label
+# League data by Label (robusta)
 # ==========================
 def _league_data_by_label(df: pd.DataFrame, label: str) -> dict | None:
+    df = df.copy()
     if "Label" not in df.columns:
-        df = df.copy()
         df["Label"] = df.apply(label_match, axis=1)
 
-    if "match_result" not in df.columns:
-        df["match_result"] = df.apply(
-            lambda r: "Home Win" if r["Home Goal FT"] > r["Away Goal FT"]
-            else "Away Win" if r["Home Goal FT"] < r["Away Goal FT"]
-            else "Draw",
-            axis=1
-        )
+    # Coercizioni sicure per esito
+    hft = pd.to_numeric(df["Home Goal FT"], errors="coerce")
+    aft = pd.to_numeric(df["Away Goal FT"], errors="coerce")
+    df["__res__"] = np.where(hft > aft, "Home Win", np.where(hft < aft, "Away Win", "Draw"))
 
     group = df.groupby("Label").agg(
         Matches=("Home", "count"),
-        HomeWin_pct=("match_result", lambda x: (x == "Home Win").mean() * 100),
-        Draw_pct=("match_result", lambda x: (x == "Draw").mean() * 100),
-        AwayWin_pct=("match_result", lambda x: (x == "Away Win").mean() * 100),
+        HomeWin_pct=("__res__", lambda x: (x == "Home Win").mean() * 100),
+        Draw_pct=("__res__", lambda x: (x == "Draw").mean() * 100),
+        AwayWin_pct=("__res__", lambda x: (x == "Away Win").mean() * 100),
     ).reset_index()
 
     row = group[group["Label"] == label]
     return row.iloc[0].to_dict() if not row.empty else None
 
+
 # ==========================
-# Back/Lay 1X2 su dataset
+# Back/Lay 1X2 su dataset (robusto)
 # ==========================
 def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
     if df.empty:
         zero = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
         return zero, zero, zero, zero, 0
 
+    # quote
     for c in ("Odd home", "Odd Draw", "Odd Away"):
         if c in df.columns:
             df[c] = _coerce_float(df[c])
 
     profits_back = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
-    profits_lay = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
-    matches = len(df)
+    profits_lay  = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
+    valid_rows = []
 
     for _, row in df.iterrows():
-        hg, ag = row["Home Goal FT"], row["Away Goal FT"]
-        result = "HOME" if hg > ag else "AWAY" if hg < ag else "DRAW"
+        hg = pd.to_numeric(row.get("Home Goal FT"), errors="coerce")
+        ag = pd.to_numeric(row.get("Away Goal FT"), errors="coerce")
+        if pd.isna(hg) or pd.isna(ag):
+            continue
+        valid_rows.append((row, int(hg), int(ag)))
 
+    if not valid_rows:
+        zero = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
+        return zero, zero, zero, zero, 0
+
+    for row, hg, ag in valid_rows:
+        result = "HOME" if hg > ag else "AWAY" if hg < ag else "DRAW"
         prices = {
             "HOME": float(row.get("Odd home", np.nan)),
             "DRAW": float(row.get("Odd Draw", np.nan)),
             "AWAY": float(row.get("Odd Away", np.nan)),
         }
+        # fallback minimi
         for k, v in prices.items():
             if not (v and v > 1.0 and np.isfinite(v)):
                 prices[k] = 2.0
 
         for outcome in ("HOME", "DRAW", "AWAY"):
             p = prices[outcome]
+            # Back
             if result == outcome:
                 profits_back[outcome] += (p - 1) * (1 - commission)
             else:
                 profits_back[outcome] -= 1
+            # Lay
             stake = 1.0 / (p - 1.0)
             if result != outcome:
                 profits_lay[outcome] += stake
             else:
                 profits_lay[outcome] -= 1.0
 
-    rois_back = {k: round((v / matches) * 100, 2) for k, v in profits_back.items()}
-    rois_lay = {k: round((v / matches) * 100, 2) for k, v in profits_lay.items()}
-    return profits_back, rois_back, profits_lay, rois_lay, matches
+    denom = len(valid_rows)
+    rois_back = {k: round((v / denom) * 100, 2) for k, v in profits_back.items()}
+    rois_lay  = {k: round((v / denom) * 100, 2) for k, v in profits_lay.items()}
+    return profits_back, rois_back, profits_lay, rois_lay, denom
+
 
 # ==========================
 # ROI Over/Under/BTTS
 # ==========================
 def _calc_market_roi(df: pd.DataFrame, market: str, price_cols: list[str],
                      line: float | None, commission: float, manual_price: float | None = None):
+    df = df.dropna(subset=["Home Goal FT", "Away Goal FT"])
     if df.empty:
-        return {
-            "Mercato": market, "Quota Media": np.nan, "Esiti %": "0.0%",
-            "ROI Back %": "0.0%", "ROI Lay %": "0.0%", "Match Analizzati": 0
-        }
+        return {"Mercato": market, "Quota Media": np.nan, "Esiti %": "0.0%",
+                "ROI Back %": "0.0%", "ROI Lay %": "0.0%", "Match Analizzati": 0}
 
     col = _first_present(price_cols, df.columns)
     odds = _coerce_float(df[col]) if col else pd.Series([np.nan] * len(df), index=df.index)
@@ -199,46 +217,40 @@ def _calc_market_roi(df: pd.DataFrame, market: str, price_cols: list[str],
         if manual_price is not None:
             odds = odds.where(odds >= 1.01, manual_price)
 
-    hits = 0
-    back_profit = 0.0
-    lay_profit = 0.0
-    total = 0
-    qsum = 0.0
-    qcount = 0
+    hits = 0; back_profit = 0.0; lay_profit = 0.0; total = 0
+    qsum = 0.0; qcount = 0
 
     for i, row in df.iterrows():
         o = float(odds.loc[i]) if i in odds.index else float("nan")
         if not (o and o >= 1.01 and np.isfinite(o)):
             continue
 
+        hg = pd.to_numeric(row["Home Goal FT"], errors="coerce")
+        ag = pd.to_numeric(row["Away Goal FT"], errors="coerce")
+        if pd.isna(hg) or pd.isna(ag):
+            continue
+
         total += 1
         qsum += o; qcount += 1
 
-        goals = int(row["Home Goal FT"]) + int(row["Away Goal FT"])
-
+        goals = int(hg) + int(ag)
         if market == "BTTS":
-            goal_both = (row["Home Goal FT"] > 0) and (row["Away Goal FT"] > 0)
+            goal_both = (hg > 0) and (ag > 0)
             if goal_both:
-                hits += 1
-                back_profit += (o - 1) * (1 - commission)
-                lay_profit -= 1
+                hits += 1; back_profit += (o - 1) * (1 - commission); lay_profit -= 1
             else:
-                lay_profit += 1 / (o - 1)
-                back_profit -= 1
+                lay_profit += 1 / (o - 1); back_profit -= 1
         else:
             assert line is not None
             if goals > line:
-                hits += 1
-                back_profit += (o - 1) * (1 - commission)
-                lay_profit -= 1
+                hits += 1; back_profit += (o - 1) * (1 - commission); lay_profit -= 1
             else:
-                lay_profit += 1 / (o - 1)
-                back_profit -= 1
+                lay_profit += 1 / (o - 1); back_profit -= 1
 
     avg_quote = round(qsum / qcount, 2) if qcount > 0 else np.nan
     pct = round((hits / total) * 100, 2) if total > 0 else 0.0
     roi_back = round((back_profit / total) * 100, 2) if total > 0 else 0.0
-    roi_lay = round((lay_profit / total) * 100, 2) if total > 0 else 0.0
+    roi_lay  = round((lay_profit  / total) * 100, 2) if total > 0 else 0.0
 
     return {
         "Mercato": market,
@@ -249,16 +261,18 @@ def _calc_market_roi(df: pd.DataFrame, market: str, price_cols: list[str],
         "Match Analizzati": total
     }
 
+
 # ==========================
 # Probabilità storiche per EV
 # ==========================
 def _market_prob(df: pd.DataFrame, market: str, line: float | None) -> float:
     if df.empty:
         return 0.0
-    goals = pd.to_numeric(df["Home Goal FT"], errors="coerce").fillna(0) + \
-            pd.to_numeric(df["Away Goal FT"], errors="coerce").fillna(0)
+    hg = pd.to_numeric(df["Home Goal FT"], errors="coerce").fillna(0)
+    ag = pd.to_numeric(df["Away Goal FT"], errors="coerce").fillna(0)
+    goals = hg + ag
     if market == "BTTS":
-        ok = ((df["Home Goal FT"] > 0) & (df["Away Goal FT"] > 0)).mean()
+        ok = ((hg > 0) & (ag > 0)).mean()
     else:
         ok = (goals > float(line)).mean() if line is not None else 0.0
     return round(float(ok) * 100, 2)
@@ -269,6 +283,7 @@ def _quality_label(n: int) -> str:
     if n >= 20:
         return "MEDIO"
     return "BASSO"
+
 
 # ==========================
 # EV storico – tabella + Best EV
@@ -318,24 +333,10 @@ def _build_ev_table(df_home_ctx: pd.DataFrame, df_away_ctx: pd.DataFrame, df_h2h
             "Match H2H": n_h2h,
         })
 
-        candidates_for_best.append({
-            "scope": "Blended",
-            "mercato": name,
-            "quota": q,
-            "prob": p_blnd,
-            "ev": ev_blnd,
-            "campione": n_h + n_a,
-            "qualita": qual_blnd
-        })
-        candidates_for_best.append({
-            "scope": "Head-to-Head",
-            "mercato": name,
-            "quota": q,
-            "prob": p_h2h,
-            "ev": ev_h2h,
-            "campione": n_h2h,
-            "qualita": qual_h2h
-        })
+        candidates_for_best.extend([
+            {"scope": "Blended", "mercato": name, "quota": q, "prob": p_blnd, "ev": ev_blnd, "campione": n_h + n_a, "qualita": qual_blnd},
+            {"scope": "Head-to-Head", "mercato": name, "quota": q, "prob": p_h2h, "ev": ev_h2h, "campione": n_h2h, "qualita": qual_h2h},
+        ])
 
     df_ev = pd.DataFrame(rows)
 
@@ -345,6 +346,7 @@ def _build_ev_table(df_home_ctx: pd.DataFrame, df_away_ctx: pd.DataFrame, df_h2h
             best = c
             break
     return df_ev, best
+
 
 # ==========================
 # ENTRY POINT (PRE-MATCH)
@@ -367,12 +369,15 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.warning(f"Nessun dato per il campionato '{league}'.")
         st.stop()
 
+    # Snapshot del campionato PRIMA del filtro stagioni (serve alla tab Statistiche squadre)
+    df_league_all = df.copy()
+
     df["Home"] = _ensure_str(df["Home"]).str.strip()
     df["Away"] = _ensure_str(df["Away"]).str.strip()
     if "Label" not in df.columns:
         df["Label"] = df.apply(label_match, axis=1)
 
-    # ======== Filtro Stagioni ========
+    # ======== Filtro Stagioni (globale) ========
     if "Stagione" in df.columns:
         seasons_desc = _seasons_desc(df["Stagione"].dropna().unique().tolist())
         latest = seasons_desc[0] if seasons_desc else None
@@ -412,12 +417,11 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     # ======== Ricerca rapida + assegnazione ruolo ========
     all_teams = sorted(set(df["Home"].dropna().unique()) | set(df["Away"].dropna().unique()))
 
-    # --- Gestione swap "deferred": se c'è un trigger, pulisco i key PRIMA di creare i widget
+    # Gestione swap “deferred”
     if st.session_state.get(_k("swap_trigger")):
-        # Pulisco i key dei widget per permettere nuovi default
         st.session_state.pop(_k("squadra_casa"), None)
         st.session_state.pop(_k("squadra_ospite"), None)
-        st.session_state[_k("swap_trigger")] = False  # reset
+        st.session_state[_k("swap_trigger")] = False
 
     with st.expander("🔎 Ricerca rapida squadre (assegna come Casa/Ospite)", expanded=True):
         col_search, col_role, col_btn = st.columns([2, 1, 1])
@@ -470,16 +474,12 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     with col_swap:
         st.write("")
         if st.button("🔁 Inverti", use_container_width=True, key=_k("swap")):
-            # Prelevo i valori correnti in modo sicuro
             current_home = st.session_state.get(_k("squadra_casa"), all_teams[default_home])
             current_away = st.session_state.get(_k("squadra_ospite"), all_teams[default_away])
-            # Anti-duplicato: se identici, non ha senso invertire
             if current_home == current_away:
                 st.warning("⚠️ Casa e Ospite sono uguali: invertire non ha effetto.")
             else:
-                # Aggiorno query params per i default del prossimo run
                 _set_qparams(home=current_away, away=current_home)
-                # Segnalo che devo pulire i key widget al prossimo run
                 st.session_state[_k("swap_trigger")] = True
                 try:
                     st.rerun()
@@ -509,7 +509,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.caption(f"Prob. Ospite ({squadra_ospite}): **{round(100/odd_away, 2)}%**")
 
     label = _label_from_odds(float(odd_home), float(odd_away))
-    label_type = _label_type(label)
+    label_t = _label_type(label)
 
     header_cols = st.columns([1, 1, 1, 1])
     header_cols[0].markdown(f"**Campionato:** `{league}`")
@@ -521,8 +521,10 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.info("⚠️ Nessuna partita trovata per questo label nel campionato: uso l'intero campionato.")
         label = None
 
-    # Tabs (solo PRE-MATCH)
-    tab_1x2, tab_roi, tab_ev = st.tabs(["1X2", "ROI mercati", "EV storico squadre"])
+    # Tabs (PRE-MATCH)
+    tab_1x2, tab_roi, tab_ev, tab_stats = st.tabs(
+        ["1X2", "ROI mercati", "EV storico squadre", "Statistiche squadre"]
+    )
 
     # ==========================
     # TAB 1: 1X2 + macro KPI
@@ -555,7 +557,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         rows = [row_league]
 
         # Casa
-        if label and label_type in ("Home", "Both"):
+        if label and label_t in ("Home", "Both"):
             df_home = df[(df["Label"] == label) & (df["Home"] == squadra_casa)]
             if df_home.empty:
                 df_home = df[df["Home"] == squadra_casa]
@@ -566,9 +568,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         profits_back, rois_back, profits_lay, rois_lay, matches_home = _calc_back_lay_1x2(df_home)
         row_home = {"LABEL": squadra_casa, "MATCHES": matches_home}
         if matches_home > 0:
-            wins = int((df_home["Home Goal FT"] > df_home["Away Goal FT"]).sum())
-            draws = int((df_home["Home Goal FT"] == df_home["Away Goal FT"]).sum())
-            losses = int((df_home["Home Goal FT"] < df_home["Away Goal FT"]).sum())
+            wins = int((pd.to_numeric(df_home["Home Goal FT"], errors="coerce") > pd.to_numeric(df_home["Away Goal FT"], errors="coerce")).sum())
+            draws = int((pd.to_numeric(df_home["Home Goal FT"], errors="coerce") == pd.to_numeric(df_home["Away Goal FT"], errors="coerce")).sum())
+            losses = int((pd.to_numeric(df_home["Home Goal FT"], errors="coerce") < pd.to_numeric(df_home["Away Goal FT"], errors="coerce")).sum())
             row_home["BACK WIN% HOME"] = round((wins / matches_home) * 100, 2)
             row_home["BACK WIN% DRAW"] = round((draws / matches_home) * 100, 2)
             row_home["BACK WIN% AWAY"] = round((losses / matches_home) * 100, 2)
@@ -582,7 +584,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         rows.append(row_home)
 
         # Ospite
-        if label and label_type in ("Away", "Both"):
+        if label and label_t in ("Away", "Both"):
             df_away = df[(df["Label"] == label) & (df["Away"] == squadra_ospite)]
             if df_away.empty:
                 df_away = df[df["Away"] == squadra_ospite]
@@ -593,9 +595,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         profits_back, rois_back, profits_lay, rois_lay, matches_away = _calc_back_lay_1x2(df_away)
         row_away = {"LABEL": squadra_ospite, "MATCHES": matches_away}
         if matches_away > 0:
-            wins = int((df_away["Away Goal FT"] > df_away["Home Goal FT"]).sum())
-            draws = int((df_away["Away Goal FT"] == df_away["Home Goal FT"]).sum())
-            losses = int((df_away["Away Goal FT"] < df_away["Home Goal FT"]).sum())
+            wins = int((pd.to_numeric(df_away["Away Goal FT"], errors="coerce") > pd.to_numeric(df_away["Home Goal FT"], errors="coerce")).sum())
+            draws = int((pd.to_numeric(df_away["Away Goal FT"], errors="coerce") == pd.to_numeric(df_away["Home Goal FT"], errors="coerce")).sum())
+            losses = int((pd.to_numeric(df_away["Away Goal FT"], errors="coerce") < pd.to_numeric(df_away["Home Goal FT"], errors="coerce")).sum())
             row_away["BACK WIN% HOME"] = round((losses / matches_away) * 100, 2)
             row_away["BACK WIN% DRAW"] = round((draws / matches_away) * 100, 2)
             row_away["BACK WIN% AWAY"] = round((wins / matches_away) * 100, 2)
@@ -828,6 +830,17 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             st.altair_chart(chart, use_container_width=True)
         else:
             st.info("Nessun dato per costruire il grafico delle probabilità.")
+
+    # ==========================
+    # TAB 4: Statistiche squadre (usa squadre.py) – filtro stagioni indipendente
+    # ==========================
+    with tab_stats:
+        render_team_stats_tab(
+            df_league_all,     # campionato PRIMA del filtro stagioni globale
+            league,
+            squadra_casa,
+            squadra_ospite,
+        )
 
     # Aggiorna query params
     _set_qparams(
