@@ -32,6 +32,20 @@ def load_local_module(module_name: str, filename: str):
         st.stop()
     return mod
 
+def get_callable(mod, *names, label: str = ""):
+    """Ritorna la prima funzione disponibile tra i nomi proposti; altrimenti errore con diagnostica."""
+    for n in names:
+        if hasattr(mod, n) and callable(getattr(mod, n)):
+            if n != names[0] and label:
+                st.info(f"ℹ️ In '{label}' uso fallback: `{n}`")
+            return getattr(mod, n)
+    # diagnostica amichevole
+    run_like = [a for a in dir(mod) if a.startswith("run") and callable(getattr(mod, a))]
+    raise AttributeError(
+        f"Nessuna delle funzioni {names} trovata nel modulo '{mod.__name__}'. "
+        f"Funzioni disponibili simili: {', '.join(run_like) or '—'}"
+    )
+
 # -------------------------------------------------------
 # Carico utils.py in modo speciale e forzo il nome "utils"
 # -------------------------------------------------------
@@ -57,14 +71,22 @@ _analisi_live_minuto = load_local_module("analisi_live_minuto", "analisi_live_mi
 _partite_del_giorno = load_local_module("partite_del_giorno", "partite_del_giorno.py")
 _reverse_engineering = load_local_module("reverse_engineering", "reverse_engineering.py")
 
-# Funzioni di sezione
-run_macro_stats = getattr(_macros, "run_macro_stats")
-run_team_stats = getattr(_squadre, "run_team_stats")
-run_pre_match = getattr(_pre_match, "run_pre_match")
-run_correct_score_ev = getattr(_correct_score_ev_sezione, "run_correct_score_ev")
-run_live_minuto_analysis = getattr(_analisi_live_minuto, "run_live_minuto_analysis")
-run_partite_del_giorno = getattr(_partite_del_giorno, "run_partite_del_giorno")
-run_reverse_engineering = getattr(_reverse_engineering, "run_reverse_engineering")
+# Funzioni di sezione (con fallback dove serve)
+run_macro_stats = get_callable(_macros, "run_macro_stats", label="macros")
+run_team_stats = get_callable(_squadre, "run_team_stats", label="squadre")
+run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
+run_correct_score_ev = get_callable(_correct_score_ev_sezione, "run_correct_score_ev", label="correct_score_ev_sezione")
+# LIVE: prova nomi alternativi se manca quello principale
+run_live_minuto_analysis = get_callable(
+    _analisi_live_minuto,
+    "run_live_minuto_analysis",
+    "run_live_minuto",
+    "run_live",
+    "main",
+    label="analisi_live_minuto",
+)
+run_partite_del_giorno = get_callable(_partite_del_giorno, "run_partite_del_giorno", label="partite_del_giorno")
+run_reverse_engineering = get_callable(_reverse_engineering, "run_reverse_engineering", label="reverse_engineering")
 
 # -------------------------------------------------------
 # (Opzionali) provo a caricare moduli extra senza bloccare l'app
@@ -208,8 +230,8 @@ col_map = {
     "sutht1": "Tiri in Porta Home 1T",
     "sutht2": "Tiri in Porta Home 2T",
     "sutat": "Tiri in Porta Away FT",
-    "sutat1": "Tiri in Porta Away 1T",
-    "sutat2": "Tiri in Porta Away 2T",
+    "satat1": "Tiri in Porta Away 1T" if "satat1" in [] else "sutat1",
+    "satat2": "Tiri in Porta Away 2T" if "satat2" in [] else "sutat2",
     "mgolh": "Minuti Goal Home",
     "gh1": "Home Goal 1 (min)",
     "gh2": "Home Goal 2 (min)",
