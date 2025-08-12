@@ -1,14 +1,12 @@
-# pre_match.py
 from __future__ import annotations
 
 import re
+from datetime import date
 import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
 
-
-from datetime import date
 from squadre import compute_team_macro_stats, render_team_stats_tab
 from utils import label_match
 
@@ -133,7 +131,7 @@ def _pick_current_season(seasons_desc: list[str]) -> list[str]:
         f"{sy}/{ey}", f"{sy}-{ey}",
         f"{sy}/{ey2}", f"{sy}-{ey2}",
         f"{sy}–{ey}",  f"{sy}–{ey2}",  # en dash
-        str(sy), str(ey)               # campionati anno solare
+        str(sy), str(ey)                   # anno solare
     ]
 
     # match esatto
@@ -218,7 +216,7 @@ def _league_data_by_label(df: pd.DataFrame, label: str) -> dict | None:
 
 
 # ==========================
-# Back/Lay 1X2 (robusto)
+# Back/Lay 1x2 (robusto)
 # ==========================
 def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
     if df.empty:
@@ -480,9 +478,12 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 if preset == "Stagione in corso":
                     seasons_selected = _pick_current_season(seasons_desc)
                 elif preset != "Tutte" and seasons_desc:
-                    n = int(preset.split()[-1])
+                    try:
+                        n = int(preset.split()[-1])
+                    except Exception:
+                        n = 1
                     seasons_selected = seasons_desc[:n]
-                elif preset == "Tutte":
+                else:  # "Tutte"
                     seasons_selected = []
 
             if seasons_selected:
@@ -740,7 +741,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         OVER35_COLS = ["cotao3", "Odd Over 3.5", "odd over 3,5", "Over 3.5"]
         BTTS_YES_COLS = ["gg", "GG", "odd goal", "BTTS Yes", "Odd BTTS Yes"]
 
-        # 🔗 Quote condivise (ogni tab ha chiavi locali diverse)
+        # 🔗 Quote condivise
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             q_ov15 = _shared_number_input("📥 Quota Over 1.5 (fallback)", "ov15", _k("roi:q_ov15"))

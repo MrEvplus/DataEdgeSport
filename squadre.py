@@ -1,9 +1,7 @@
-# squadre.py
 from __future__ import annotations
 
 import re
-from datetime import datetime
-
+from datetime import date
 import altair as alt
 import numpy as np
 import pandas as pd
@@ -38,6 +36,30 @@ def _season_sort_key(s: str) -> int:
 def _seasons_desc(unique_seasons: list) -> list[str]:
     arr = [str(x) for x in unique_seasons if pd.notna(x)]
     return sorted(arr, key=_season_sort_key, reverse=True)
+
+def _pick_current_season(seasons_desc: list[str]) -> list[str]:
+    if not seasons_desc:
+        return []
+    today = date.today()
+    if today.month >= 7:
+        sy, ey = today.year, today.year + 1
+    else:
+        sy, ey = today.year - 1, today.year
+    ey2 = str(ey)[-2:]
+    candidates = [
+        f"{sy}/{ey}", f"{sy}-{ey}",
+        f"{sy}/{ey2}", f"{sy}-{ey2}",
+        f"{sy}–{ey}",  f"{sy}–{ey2}",
+        str(sy), str(ey),
+    ]
+    for cand in candidates:
+        for s in seasons_desc:
+            if s.strip() == cand:
+                return [s]
+    for s in seasons_desc:
+        if str(sy) in s or str(ey) in s:
+            return [s]
+    return seasons_desc[:1]
 
 def _limit_last_n(df_in: pd.DataFrame, n: int) -> pd.DataFrame:
     if n and n > 0 and "Data" in df_in.columns:
@@ -169,7 +191,7 @@ def _render_setup_and_body(
                 key="teams:seasons_preset",
             )
             if preset == "Stagione in corso":
-                seasons_selected = seasons_desc[:1] if seasons_desc else []
+                seasons_selected = _pick_current_season(seasons_desc)
             elif preset != "Tutte" and seasons_desc:
                 try:
                     n = int(preset.split()[-1])
@@ -310,7 +332,7 @@ def _render_setup_and_body(
         st.altair_chart(ch, use_container_width=True)
     if patterns_away:
         st.markdown(f"**Distribuzione Goal – {squadra_ospite} (Away)**")
-        ca = plot_timeframe_goals(tf_scored_away, tf_conceded_away, tf_conceded_away_pct, tf_conceded_away_pct, squadra_ospite)
+        ca = plot_timeframe_goals(tf_scored_away, tf_conceded_away, tf_scored_away_pct, tf_conceded_away_pct, squadra_ospite)
         st.altair_chart(ca, use_container_width=True)
 
     st.divider()
@@ -400,7 +422,7 @@ def compute_team_macro_stats(df: pd.DataFrame, team: str, venue: str) -> dict:
 
     gf = float(_coerce_num(data[gf_col]).mean())
     ga = float(_coerce_num(data[ga_col]).mean())
-    btts = float(((data["Home Goal FT"] > 0) & (data["Away Goal FT"] > 0)).mean() * 100)
+    btts = float(((_coerce_num(data["Home Goal FT"]) > 0) & (_coerce_num(data["Away Goal FT"]) > 0)).mean() * 100)
 
     return {
         "Matches Played": n,
