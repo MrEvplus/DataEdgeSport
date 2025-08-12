@@ -3,62 +3,93 @@ from __future__ import annotations
 
 import os
 import sys
-import importlib
-from importlib.machinery import SourceFileLoader
-
+import importlib.util
 import streamlit as st
 import pandas as pd
 import numpy as np
 
-# -------------------------------------------------------------------
-# Import robusto di utils.py (evita conflitti con pacchetti "utils")
-# -------------------------------------------------------------------
-UTILS_PATH = os.path.join(os.path.dirname(__file__), "utils.py")
-try:
-    _utils = SourceFileLoader("app_utils", UTILS_PATH).load_module()
-except Exception as e:
-    st.error(f"Errore nell'import di utils.py: {type(e).__name__} - {e}")
-    st.stop()
+# -------------------------------------------------------
+# Loader robusto per moduli locali (evita conflitti nome)
+# -------------------------------------------------------
+BASE_DIR = os.path.dirname(__file__)
 
-# 🔧 FIX ANTI-CONFLITTO: forza tutti i "import utils" a usare questo file
+def load_local_module(module_name: str, filename: str):
+    """Carica un modulo Python locale da filename e lo registra in sys.modules[module_name]."""
+    path = os.path.join(BASE_DIR, filename)
+    if not os.path.exists(path):
+        st.error(f"Modulo mancante: {filename}")
+        st.stop()
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        st.error(f"Impossibile creare lo spec per {filename}")
+        st.stop()
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = mod
+    try:
+        spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    except Exception as e:
+        st.error(f"Errore nell'import di {filename}: {type(e).__name__} — {e}")
+        st.stop()
+    return mod
+
+# -------------------------------------------------------
+# Carico utils.py in modo speciale e forzo il nome "utils"
+# -------------------------------------------------------
+_utils = load_local_module("app_utils", "utils.py")
+# 🔧 Forza tutti i 'import utils' degli altri file a usare questo
 sys.modules["utils"] = _utils
 
-# ora prendo i simboli che mi servono
+# Estraggo i simboli che servono da utils
 SUPABASE_URL = getattr(_utils, "SUPABASE_URL", "")
 SUPABASE_KEY = getattr(_utils, "SUPABASE_KEY", "")
 load_data_from_supabase = getattr(_utils, "load_data_from_supabase")
 load_data_from_file = getattr(_utils, "load_data_from_file")
 label_match = getattr(_utils, "label_match")
 
-# -------------------------------------------------------------------
-# Moduli di sezione (presenti nel repo)
-# -------------------------------------------------------------------
-from macros import run_macro_stats
-from squadre import run_team_stats
-from pre_match import run_pre_match
-from correct_score_ev_sezione import run_correct_score_ev
-from analisi_live_minuto import run_live_minuto_analysis
-from partite_del_giorno import run_partite_del_giorno
-from reverse_engineering import run_reverse_engineering
+# -------------------------------------------------------
+# Carico tutti i moduli locali con loader esplicito
+# -------------------------------------------------------
+_macros = load_local_module("macros", "macros.py")
+_squadre = load_local_module("squadre", "squadre.py")
+_pre_match = load_local_module("pre_match", "pre_match.py")
+_correct_score_ev_sezione = load_local_module("correct_score_ev_sezione", "correct_score_ev_sezione.py")
+_analisi_live_minuto = load_local_module("analisi_live_minuto", "analisi_live_minuto.py")
+_partite_del_giorno = load_local_module("partite_del_giorno", "partite_del_giorno.py")
+_reverse_engineering = load_local_module("reverse_engineering", "reverse_engineering.py")
 
-# Moduli opzionali: se mancano non blocchiamo l’app
+# Funzioni di sezione
+run_macro_stats = getattr(_macros, "run_macro_stats")
+run_team_stats = getattr(_squadre, "run_team_stats")
+run_pre_match = getattr(_pre_match, "run_pre_match")
+run_correct_score_ev = getattr(_correct_score_ev_sezione, "run_correct_score_ev")
+run_live_minuto_analysis = getattr(_analisi_live_minuto, "run_live_minuto_analysis")
+run_partite_del_giorno = getattr(_partite_del_giorno, "run_partite_del_giorno")
+run_reverse_engineering = getattr(_reverse_engineering, "run_reverse_engineering")
+
+# -------------------------------------------------------
+# (Opzionali) provo a caricare moduli extra senza bloccare l'app
+# -------------------------------------------------------
 try:
     from supabase import create_client  # noqa: F401
 except Exception:
     create_client = None
 
-for _opt in ("api_football_utils", "ai_inference", "mappa_leghe_supabase"):
+def try_load_optional(name: str, filename: str):
     try:
-        importlib.import_module(_opt)
+        return load_local_module(name, filename)
     except Exception:
-        pass
+        return None
+
+_api_football_utils = try_load_optional("api_football_utils", "api_football_utils.py")
+_ai_inference = try_load_optional("ai_inference", "ai_inference.py")
+_mappa_leghe_supabase = try_load_optional("mappa_leghe_supabase", "mappa_leghe_supabase.py")
 
 # -------------------------------------------------------
 # SUPPORTO
 # -------------------------------------------------------
 def get_league_mapping() -> dict:
     """
-    Recupera (opzionalmente) la mappa code -> league_name da Supabase.
+    Recupera (opzionalmente) la mappa code -> league_name da Supabase (tabella 'league_mapping').
     Se il client non è disponibile o la tabella non esiste, ritorna {}.
     """
     try:
@@ -148,8 +179,7 @@ col_map = {
     "place1a": "Posizione Classifica Home",
     "place2": "Posizione Classifica Away Generale",
     "place2d": "Posizione classifica away",
-    # IMPORTANTE: "Odd home" minuscolo
-    "cotaa": "Odd home",
+    "cotaa": "Odd home",  # IMPORTANTE minuscolo
     "cotad": "Odd Away",
     "cotae": "Odd Draw",
     "cotao0": "Odd Over 0.5",
