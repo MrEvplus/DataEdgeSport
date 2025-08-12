@@ -2,17 +2,35 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from utils import label_match, extract_minutes
+
+# import robusto (funziona sia con app.py che standalone)
+try:
+    from utils import label_match, extract_minutes
+except Exception:
+    from app_utils import label_match, extract_minutes  # type: ignore
+
+
+# --------------------------------------------------------
+# Helper: gestisce fillna su colonne anche Categoriche
+# --------------------------------------------------------
+def _ensure_str_with_unknown(s: pd.Series, default: str = "Unknown") -> pd.Series:
+    """Rende la serie stringa, aggiunge 'default' dove NA o stringa vuota.
+    Gestisce correttamente anche dtype Categorical."""
+    if pd.api.types.is_categorical_dtype(s.dtype):
+        s = s.cat.add_categories([default]).fillna(default)
+        s = s.astype("string")
+    else:
+        s = s.astype("string").fillna(default)
+    return s.replace("", default)
+
 
 # --------------------------------------------------------
 # FUNZIONE: Calcolo Goal Timeframes
 # --------------------------------------------------------
-
 def calculate_goal_timeframes(sub_df, label):
     """
     Calcola la distribuzione % dei goal segnati e concessi per intervallo di minuti.
     """
-
     time_bands = ["0-15", "16-30", "31-45", "46-60", "61-75", "76-90"]
 
     # Leggi minuti goal da colonne corrette (post-rename)
@@ -118,10 +136,10 @@ def calculate_goal_timeframes(sub_df, label):
 
     return scored_percents, conceded_percents
 
+
 # --------------------------------------------------------
 # MAIN FUNCTION
 # --------------------------------------------------------
-
 def run_macro_stats(df, db_selected):
     st.title(f"Macro Stats per Campionato - {db_selected}")
 
@@ -142,13 +160,13 @@ def run_macro_stats(df, db_selected):
         st.write("Colonne presenti nel file:", list(df.columns))
         st.stop()
 
-    df["country"] = df["country"].fillna("Unknown").astype(str).replace("", "Unknown")
-    df["Stagione"] = df["Stagione"].fillna("Unknown").astype(str).replace("", "Unknown")
+    # ✅ FIX: gestisci correttamente le categoriche
+    df["country"] = _ensure_str_with_unknown(df["country"], "Unknown")
+    df["Stagione"] = _ensure_str_with_unknown(df["Stagione"], "Unknown")
 
     # ----------------------------------------------------------
     # CONVERSIONE QUOTE
     # ----------------------------------------------------------
-
     for col in ["Odd home", "Odd Draw", "Odd Away"]:
         if col in df.columns:
             df[col] = (
@@ -160,7 +178,8 @@ def run_macro_stats(df, db_selected):
             )
 
     # ----------------------------------------------------------
-
+    # Feature base
+    # ----------------------------------------------------------
     if "goals_total" not in df.columns:
         df["goals_total"] = df["Home Goal FT"] + df["Away Goal FT"]
 
@@ -183,9 +202,12 @@ def run_macro_stats(df, db_selected):
             axis=1
         )
 
+    # ----------------------------------------------------------
+    # Aggregazione per Campionato/Stagione
+    # ----------------------------------------------------------
     home_col = "Home"
-
     group_cols = ["country", "Stagione"]
+
     grouped = df.groupby(group_cols).agg(
         Matches=(home_col, "count"),
         HomeWin_pct=("match_result", lambda x: (x == "Home Win").mean() * 100),
@@ -205,6 +227,7 @@ def run_macro_stats(df, db_selected):
         BTTS_pct=("btts", lambda x: x.mean() * 100),
     ).reset_index()
 
+    # rinomina percentuali
     new_columns = {}
     for col in grouped.columns:
         if "pct" in col:
@@ -212,23 +235,18 @@ def run_macro_stats(df, db_selected):
         else:
             new_col = col
         new_columns[col] = new_col
-
     grouped.rename(columns=new_columns, inplace=True)
-    cols_numeric = grouped.select_dtypes(include=[np.number]).columns
-    grouped[cols_numeric] = grouped[cols_numeric].round(2)
+
+    # arrotonda numeriche
+    cols_numeric_grouped = grouped.select_dtypes(include=[np.number]).columns
+    grouped[cols_numeric_grouped] = grouped[cols_numeric_grouped].round(2)
 
     # ----------------------------------------------------------
     # AGGIUNGI RIGA TOTALE
     # ----------------------------------------------------------
-
     if not grouped.empty:
-        total_row = {}
-
-        total_row["country"] = "Total"
-        total_row["Stagione"] = "-"
-
+        total_row = {"country": "Total", "Stagione": "-"}
         total_row["Matches"] = grouped["Matches"].sum()
-
         for col in grouped.columns:
             if col not in ["country", "Stagione", "Matches"]:
                 weighted_sum = (grouped[col] * grouped["Matches"]).sum()
@@ -236,7 +254,6 @@ def run_macro_stats(df, db_selected):
                 total_row[col] = round(weighted_avg, 2)
 
         total_df = pd.DataFrame([total_row])
-
         grouped_final = pd.concat([grouped, total_df], ignore_index=True)
 
         st.subheader(f"✅ League Stats Summary - {db_selected}")
@@ -246,9 +263,8 @@ def run_macro_stats(df, db_selected):
         st.dataframe(grouped, use_container_width=True, hide_index=True)
 
     # ----------------------------------------------------------
-    # League Data by Start Price
+    # League Data by Start Price (Label)
     # ----------------------------------------------------------
-
     df["Label"] = df.apply(label_match, axis=1)
 
     group_label = df.groupby("Label").agg(
@@ -271,7 +287,8 @@ def run_macro_stats(df, db_selected):
     ).reset_index()
 
     group_label.rename(columns=new_columns, inplace=True)
-    group_label[cols_numeric] = group_label[cols_numeric].round(2)
+    cols_numeric_label = group_label.select_dtypes(include=[np.number]).columns
+    group_label[cols_numeric_label] = group_label[cols_numeric_label].round(2)
 
     st.subheader(f"✅ League Data by Start Price - {db_selected}")
     st.dataframe(group_label, use_container_width=True, hide_index=True)
@@ -279,7 +296,6 @@ def run_macro_stats(df, db_selected):
     # ----------------------------------------------------------
     # Goal Time Frame plots per Label
     # ----------------------------------------------------------
-
     st.subheader(f"✅ Distribuzione Goal Time Frame % per Label - {db_selected}")
 
     labels = list(df["Label"].dropna().unique())
@@ -295,35 +311,31 @@ def run_macro_stats(df, db_selected):
                 time_bands = list(scored_percents.keys())
 
                 fig = go.Figure()
-
                 fig.add_trace(go.Bar(
                     x=time_bands,
                     y=[scored_percents[b] for b in time_bands],
                     name='Goals Scored (%)',
                     marker_color='green'
                 ))
-
                 fig.add_trace(go.Bar(
                     x=time_bands,
                     y=[conceded_percents[b] for b in time_bands],
                     name='Goals Conceded (%)',
                     marker_color='red'
                 ))
-
                 fig.update_layout(
                     title=f"Goal Time Frame % - {label}",
                     barmode='group',
                     height=400,
                     yaxis=dict(title='Percentage (%)')
                 )
-
                 with cols[j]:
                     st.plotly_chart(fig, use_container_width=True)
+
 
 # ---------------------------------------------
 # FUNZIONI ROI GOAL & BTTS - Over 1.5/2.5/3.5 + GG
 # ---------------------------------------------
-
 def calcola_roi_mercato_over_under(df, linea, col_ov, col_un, commissione):
     df = df.dropna(subset=["Home Goal FT", "Away Goal FT", col_ov, col_un])
     df = df[(df[col_ov] >= 1.01) & (df[col_un] >= 1.01)]
@@ -358,6 +370,7 @@ def calcola_roi_mercato_over_under(df, linea, col_ov, col_un, commissione):
         }
     else:
         return {}
+
 
 def calcola_roi_btts(df, commissione):
     df = df.dropna(subset=["Home Goal FT", "Away Goal FT", "odd goal", "odd nogoal"])
