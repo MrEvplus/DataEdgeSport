@@ -1,5 +1,4 @@
-# analisi_live_minuto.py — v3.5 UI Pro — Live 1X2 + Over/BTTS + EV Advisor (AI) + Write-back + Hedging
-# Logica invariata, solo miglioramenti di UX/UI, grafica e struttura a tab.
+# analisi_live_minuto.py — v3.5.1 UI Pro (fix styler) — Live 1X2 + Over/BTTS + EV Advisor (AI) + Write-back + Hedging
 
 import math
 import numpy as np
@@ -418,7 +417,7 @@ def run_live_minute_analysis(df: pd.DataFrame):
         add_row("2 (Away)", "Lay",  lay_away, p_away, priors["2"])
 
         # Over
-        for line, q in q_map.items():
+        for line, q in {0.5:q_over05, 1.5:q_over15, 2.5:q_over25, 3.5:q_over35}.items():
             add_row(f"Over {line}", "Back", q, probs_over[line], priors[f"Over {line}"])
             add_row(f"Over {line}", "Lay",  q, probs_over[line], priors[f"Over {line}"])
         # BTTS
@@ -428,15 +427,42 @@ def run_live_minute_analysis(df: pd.DataFrame):
 
     df_ev_full = _ev_rows()
 
-    # Styler EV
+    # Styler EV (robusto alle colonne presenti)
     def _style_ev(df_):
+        fmt_map = {}
+        if "Quota" in df_.columns:    fmt_map["Quota"] = "{:.2f}"
+        if "Prob %%" in df_.columns:  fmt_map["Prob %%"] = "{:.1f}%"
+        if "Prob %" in df_.columns:   fmt_map["Prob %"] = "{:.1f}%"
+        if "Fair" in df_.columns:     fmt_map["Fair"] = "{:.2f}"
+        if "Edge" in df_.columns:     fmt_map["Edge"] = "{:.1%}"
+        if "EV %" in df_.columns:     fmt_map["EV %"] = "{:.1f}%"
+        if "½-Kelly %" in df_.columns:fmt_map["½-Kelly %"] = "{:.1f}%"
+
         def _bg(s):
-            return [ "background-color: rgba(34,197,94,0.14)" if v>0 else ("background-color: rgba(239,68,68,0.14)" if v<0 else "") for v in s ]
-        sty = (df_.style
-               .format({"Quota":"{:.2f}","Prob %":"{:.1f}%","Fair":"{:.2f}","Edge":"{:.1%}","EV %":"{:.1f}%","½-Kelly %":"{:.1f}%"})
-               .apply(_bg, subset=["EV"])
-               .apply(_bg, subset=["Edge"])
-              )
+            # verde per valori >0, rosso per <0
+            out = []
+            for v in s:
+                try:
+                    val = float(v)
+                except Exception:
+                    out.append("")
+                    continue
+                if val > 0:
+                    out.append("background-color: rgba(34,197,94,0.14)")
+                elif val < 0:
+                    out.append("background-color: rgba(239,68,68,0.14)")
+                else:
+                    out.append("")
+            return out
+
+        sty = df_.style.format(fmt_map)
+        # Applica highlight solo alle colonne esistenti
+        if "EV" in df_.columns:
+            sty = sty.apply(_bg, subset=["EV"])
+        if "EV %" in df_.columns:
+            sty = sty.apply(_bg, subset=["EV %"])
+        if "Edge" in df_.columns:
+            sty = sty.apply(_bg, subset=["Edge"])
         return sty
 
     # ========== TAB 2: EV ADVISOR ==========
