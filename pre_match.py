@@ -9,7 +9,9 @@ import altair as alt
 
 from squadre import compute_team_macro_stats, render_team_stats_tab
 from utils import label_match
-from correct_score import run_correct_score_panel  # <-- nuova tab usa questo pannello
+from correct_score import run_correct_score_panel  # <-- già presente
+# >>> NEW: Live module import
+from analisi_live_minuto import run_live_minute_analysis  # modulo Live integrato
 
 # ==========================
 # Altair Theme (globale)
@@ -607,9 +609,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.info("⚠️ Nessuna partita trovata per questo label nel campionato: uso l'intero campionato.")
         label = None
 
-    # ======== Tabs (aggiunta la quinta per Correct Score) ========
-    tab_1x2, tab_roi, tab_ev, tab_stats, tab_cs = st.tabs(
-        ["1X2", "ROI mercati", "EV storico squadre", "Statistiche squadre", "Correct Score"]
+    # ======== Tabs (aggiunta la sesta per Live) ========
+    tab_1x2, tab_roi, tab_ev, tab_stats, tab_cs, tab_live = st.tabs(
+        ["1X2", "ROI mercati", "EV storico squadre", "Statistiche squadre", "Correct Score", "Live da Minuto"]
     )
 
     # ==========================
@@ -906,6 +908,48 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             default_recent_n=6,
             default_max_goals=6,
         )
+
+    # ==========================
+    # TAB 6: Live da Minuto (integrazione modulo)
+    # ==========================
+    with tab_live:
+        st.markdown("**Analisi Live** — precompilata con i dati selezionati sopra.")
+
+        # Prefill: campionato & squadre per il modulo Live
+        st.session_state["campionato_corrente"] = league  # usato dal modulo Live
+        st.session_state["home_live"] = squadra_casa
+        st.session_state["away_live"] = squadra_ospite
+
+        # Prefill: quote 1x2 per il modulo Live
+        st.session_state["odd_h"] = float(odd_home)
+        st.session_state["odd_d"] = float(odd_draw)
+        st.session_state["odd_a"] = float(odd_away)
+
+        # Opzionale: mini controlli veloci (si può usare anche solo l'interfaccia interna del modulo)
+        cL1, cL2 = st.columns([1,1])
+        with cL1:
+            live_minute = st.slider("⏲️ Minuto (prefill)", min_value=1, max_value=120, value=45, key=_k("live:min"))
+            st.session_state["minlive"] = int(live_minute)
+        with cL2:
+            live_score = st.text_input("📟 Risultato live (prefill)", value="0-0", key=_k("live:score"))
+            st.session_state["scorelive"] = str(live_score).strip()
+
+        st.caption("Suggerimento: puoi modificare anche i controlli interni del modulo Live.")
+
+        # Evita l’errore Streamlit quando un modulo figlio richiama set_page_config
+        _orig_set_cfg = getattr(st, "set_page_config", None)
+        try:
+            def _noop(*args, **kwargs):
+                return None
+            st.set_page_config = _noop  # no-op locale
+
+            # Chiamiamo il modulo Live passando l'intero campionato (snapshot prima del filtro stagioni)
+            run_live_minute_analysis(df_league_all)
+        except Exception as e:
+            st.warning(f"Modulo Live caricato con avviso: {e}")
+        finally:
+            if _orig_set_cfg:
+                st.set_page_config = _orig_set_cfg  # ripristina
 
     # Aggiorna query params (opzionale)
     shared = _get_shared_quotes()
