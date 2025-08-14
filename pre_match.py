@@ -1,4 +1,4 @@
-# pre_match.py — versione completa, con Macro KPI Plus e integrazione con i filtri globali dell’HUB
+# pre_match.py — versione completa PRO, con Macro KPI Plus (tabelle pro) e integrazione con filtri HUB
 from __future__ import annotations
 
 import re
@@ -8,23 +8,17 @@ import pandas as pd
 import numpy as np
 import altair as alt
 
-# ----- Moduli esterni (robusti ai nomi differenti già presenti nel progetto) -----
-# Team stats
+# ----- Moduli esterni (robusti a nomi differenti) -----
 try:
     from squadre import compute_team_macro_stats, render_team_stats_tab
 except Exception:
-    # Fallback se i nomi non coincidono: tenteremo in team_stats.py
     try:
         from team_stats import compute_team_macro_stats, render_team_stats_tab  # type: ignore
     except Exception:
         compute_team_macro_stats = None  # type: ignore
-        def render_team_stats_tab(*args, **kwargs):
-            st.info("Modulo 'squadre/team_stats' non disponibile: scheda 'Statistiche squadre' limitata.")
 
-# Labeling quote
 from utils import label_match
 
-# Correct Score (fallback ai diversi nomi usati nel progetto)
 try:
     from correct_score import run_correct_score_panel
 except Exception:
@@ -33,7 +27,6 @@ except Exception:
     except Exception:
         run_correct_score_panel = None  # type: ignore
 
-# Live — nomi funzione diversi in alcune versioni
 try:
     from analisi_live_minuto import run_live_minuto_analysis as _run_live
 except Exception:
@@ -44,26 +37,26 @@ except Exception:
 
 
 # ==========================
-# Config: usa SEMPRE filtri globali dall'Hub (niente selettori locali)
+# Config HUB
 # ==========================
 USE_GLOBAL_FILTERS = True
 GLOBAL_CHAMP_KEY   = "global_country"
-GLOBAL_SEASONS_KEY = "global_seasons"   # lista di stagioni scelte nell’Hub
+GLOBAL_SEASONS_KEY = "global_seasons"   # lista stagioni (HUB)
 
 
 # ==========================
-# Altair Theme (globale)
+# Altair Theme
 # ==========================
 def _alt_theme():
     return {
         "config": {
             "view": {"stroke": "transparent"},
-            "axis": {"labelFontSize": 12, "titleFontSize": 12},
-            "legend": {"labelFontSize": 12, "titleFontSize": 12},
-            "title": {"fontSize": 14},
+            "axis": {"labelFontSize": 12, "titleFontSize": 12, "gridColor": "#223", "labelColor": "#e5e7eb", "titleColor": "#cbd5e1"},
+            "legend": {"labelFontSize": 12, "titleFontSize": 12, "labelColor": "#e5e7eb", "titleColor": "#cbd5e1"},
+            "title": {"fontSize": 14, "color": "#e5e7eb"},
+            "background": "transparent",
         }
     }
-
 try:
     alt.themes.register("app_theme", _alt_theme)
     alt.themes.enable("app_theme")
@@ -93,8 +86,7 @@ def _coerce_float(s: pd.Series) -> pd.Series:
     return pd.to_numeric(_ensure_str(s).str.replace(",", ".", regex=False), errors="coerce")
 
 def _first_present(cols, columns: pd.Index) -> str | None:
-    """Ritorna il primo nome colonna presente in `columns`.
-    Accetta anche None o oggetti non iterabili senza esplodere."""
+    """Ritorna il primo nome colonna presente; accetta anche None/non-iterabili."""
     if not cols:
         return None
     try:
@@ -148,7 +140,7 @@ def _set_qparams(**kwargs):
 
 
 # ==========================
-# Stagioni (ordina dalla più recente)
+# Stagioni helpers
 # ==========================
 def _season_sort_key(s: str) -> int:
     if not isinstance(s, str):
@@ -161,27 +153,16 @@ def _seasons_desc(unique_seasons: list) -> list[str]:
     return sorted(arr, key=_season_sort_key, reverse=True)
 
 def _pick_current_season(seasons_desc: list[str]) -> list[str]:
-    """
-    Sceglie la stagione 'in corso' in base alla data odierna.
-    Logica EU: stagione = 1 luglio (sy) -> 30 giugno (ey).
-    Riconosce formati: 'YYYY/YYYY+1', 'YYYY-YYYY+1', 'YYYY/YY', 'YYYY-YY', 'YYYY'.
-    """
+    """Stagione in corso: 1 Lug -> 30 Giu (EU style)."""
     if not seasons_desc:
         return []
-
     today = date.today()
-    if today.month >= 7:   # lug-dic
+    if today.month >= 7:
         sy, ey = today.year, today.year + 1
-    else:                  # gen-giu
+    else:
         sy, ey = today.year - 1, today.year
-
     ey2 = str(ey)[-2:]
-    candidates = [
-        f"{sy}/{ey}", f"{sy}-{ey}",
-        f"{sy}/{ey2}", f"{sy}-{ey2}",
-        f"{sy}–{ey}",  f"{sy}–{ey2}",  # en dash
-        str(sy), str(ey)                   # anno solare
-    ]
+    candidates = [f"{sy}/{ey}", f"{sy}-{ey}", f"{sy}/{ey2}", f"{sy}-{ey2}", f"{sy}–{ey}", f"{sy}–{ey2}", str(sy), str(ey)]
     for cand in candidates:
         for s in seasons_desc:
             if s.strip() == cand:
@@ -208,7 +189,6 @@ def _init_shared_quotes():
 
 def _shared_number_input(label: str, shared_name: str, local_key: str,
                          min_value: float = 1.01, step: float = 0.01):
-    """Widget locale che scrive sulle quote condivise."""
     _init_shared_quotes()
     if local_key not in st.session_state:
         st.session_state[local_key] = float(st.session_state[_shared_key(shared_name)])
@@ -216,13 +196,7 @@ def _shared_number_input(label: str, shared_name: str, local_key: str,
     def _on_change():
         st.session_state[_shared_key(shared_name)] = float(st.session_state[local_key])
 
-    return st.number_input(
-        label,
-        min_value=min_value,
-        step=step,
-        key=local_key,
-        on_change=_on_change,
-    )
+    return st.number_input(label, min_value=min_value, step=step, key=local_key, on_change=_on_change)
 
 def _get_shared_quotes() -> dict:
     _init_shared_quotes()
@@ -235,7 +209,7 @@ def _get_shared_quotes() -> dict:
 
 
 # ==========================
-# League data by Label (robusta) + cache
+# League data by Label + cache
 # ==========================
 @st.cache_data(show_spinner=False, ttl=900)
 def _league_data_by_label_cached(df_light: pd.DataFrame, label: str | None) -> dict | None:
@@ -262,7 +236,7 @@ def _league_data_by_label_cached(df_light: pd.DataFrame, label: str | None) -> d
 
 
 # ==========================
-# Back/Lay 1x2 (robusto) + cache
+# Back/Lay 1x2 + cache
 # ==========================
 def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
     if df.empty:
@@ -322,26 +296,23 @@ def _calc_back_lay_1x2_cached(df_light: pd.DataFrame, commission: float = 0.0):
 
 
 # ==========================
-# ROI Over/Under/BTTS + cache
+# ROI Over/BTTS + cache (robusto)
 # ==========================
-def _calc_market_roi(df: pd.DataFrame, market: str, price_cols,   # <- accetta qualunque cosa
+def _calc_market_roi(df: pd.DataFrame, market: str, price_cols,
                      line: float | None, commission: float, manual_price: float | None = None):
     df = df.dropna(subset=["Home Goal FT", "Away Goal FT"])
     if df.empty:
         return {"Mercato": market, "Quota Media": np.nan, "Esiti %": "0.0%",
                 "ROI Back %": "0.0%", "ROI Lay %": "0.0%", "Match Analizzati": 0}
 
-    # 🛡️ robustezza: se price_cols è None o non iterabile, nessuna colonna di prezzo
     col = _first_present(price_cols, df.columns)
     odds = _coerce_float(df[col]) if col else pd.Series([np.nan] * len(df), index=df.index)
 
-    # se non ho odds valide, uso la manuale (se c'è); altrimenti rimangono NaN e più sotto verranno saltate
     if manual_price and (odds.isna() | (odds < 1.01)).all():
         odds = pd.Series([manual_price] * len(df), index=df.index)
     else:
         if manual_price is not None:
             odds = odds.where(odds >= 1.01, manual_price)
-
 
     hits = 0; back_profit = 0.0; lay_profit = 0.0; total = 0
     qsum = 0.0; qcount = 0
@@ -379,12 +350,8 @@ def _calc_market_roi(df: pd.DataFrame, market: str, price_cols,   # <- accetta q
     roi_lay  = round((lay_profit  / total) * 100, 2) if total > 0 else 0.0
 
     return {
-        "Mercato": market,
-        "Quota Media": avg_quote,
-        "Esiti %": f"{pct}%",
-        "ROI Back %": f"{roi_back}%",
-        "ROI Lay %": f"{roi_lay}%",
-        "Match Analizzati": total
+        "Mercato": market, "Quota Media": avg_quote, "Esiti %": f"{pct}%",
+        "ROI Back %": f"{roi_back}%", "ROI Lay %": f"{roi_lay}%", "Match Analizzati": total
     }
 
 @st.cache_data(show_spinner=False, ttl=900)
@@ -409,27 +376,19 @@ def _market_prob(df: pd.DataFrame, market: str, line: float | None) -> float:
     return round(float(ok) * 100, 2)
 
 def _quality_label(n: int) -> str:
-    if n >= 50:
-        return "ALTO"
-    if n >= 20:
-        return "MEDIO"
+    if n >= 50: return "ALTO"
+    if n >= 20: return "MEDIO"
     return "BASSO"
 
 
 # ==========================
-# EV storico – tabella + Best EV + cache
+# EV storico – tabella + Best EV
 # ==========================
 def _build_ev_table(df_home_ctx: pd.DataFrame, df_away_ctx: pd.DataFrame, df_h2h: pd.DataFrame,
                     squadra_casa: str, squadra_ospite: str,
                     quota_ov15: float, quota_ov25: float, quota_ov35: float, quota_btts: float):
-    markets = [
-        ("Over 1.5", 1.5, quota_ov15),
-        ("Over 2.5", 2.5, quota_ov25),
-        ("Over 3.5", 3.5, quota_ov35),
-        ("BTTS", None, quota_btts),
-    ]
-    rows = []
-    candidates_for_best = []
+    markets = [("Over 1.5", 1.5, quota_ov15), ("Over 2.5", 2.5, quota_ov25), ("Over 3.5", 3.5, quota_ov35), ("BTTS", None, quota_btts)]
+    rows, candidates_for_best = [], []
 
     for name, line, q in markets:
         p_home = _market_prob(df_home_ctx, name, line)
@@ -447,21 +406,12 @@ def _build_ev_table(df_home_ctx: pd.DataFrame, df_away_ctx: pd.DataFrame, df_h2h
         qual_h2h  = _quality_label(n_h2h)
 
         rows.append({
-            "Mercato": name,
-            "Quota": q,
-            f"{squadra_casa} @Casa %": p_home,
-            f"EV {squadra_casa}": ev_home,
-            f"{squadra_ospite} @Trasferta %": p_away,
-            f"EV {squadra_ospite}": ev_away,
-            "Blended %": p_blnd,
-            "EV Blended": ev_blnd,
-            "Qualità Blended": qual_blnd,
-            "Head-to-Head %": p_h2h,
-            "EV H2H": ev_h2h,
-            "Qualità H2H": qual_h2h,
-            "Match H": n_h,
-            "Match A": n_a,
-            "Match H2H": n_h2h,
+            "Mercato": name, "Quota": q,
+            f"{squadra_casa} @Casa %": p_home, f"EV {squadra_casa}": ev_home,
+            f"{squadra_ospite} @Trasferta %": p_away, f"EV {squadra_ospite}": ev_away,
+            "Blended %": p_blnd, "EV Blended": ev_blnd, "Qualità Blended": qual_blnd,
+            "Head-to-Head %": p_h2h, "EV H2H": ev_h2h, "Qualità H2H": qual_h2h,
+            "Match H": n_h, "Match A": n_a, "Match H2H": n_h2h,
         })
 
         candidates_for_best.extend([
@@ -474,8 +424,7 @@ def _build_ev_table(df_home_ctx: pd.DataFrame, df_away_ctx: pd.DataFrame, df_h2h
     best = None
     for c in sorted(candidates_for_best, key=lambda x: (x["ev"], 1 if x["scope"] == "Blended" else 0), reverse=True):
         if c["ev"] > 0:
-            best = c
-            break
+            best = c; break
     return df_ev, best
 
 @st.cache_data(show_spinner=False, ttl=900)
@@ -487,7 +436,7 @@ def _build_ev_table_cached(home_ctx_light: pd.DataFrame, away_ctx_light: pd.Data
 
 
 # ================================================================
-# ===============  MACRO KPI PLUS (4 blocchi)  ===================
+# ===============  MACRO KPI PLUS (tabelle pro)  =================
 # ================================================================
 _MIN_RE = re.compile(r"\d+")
 
@@ -509,45 +458,25 @@ def _first_goal_side_min(row):
     h_raw = row.get("minuti goal segnato home", row.get("Minuti Goal Home"))
     a_raw = row.get("minuti goal segnato away", row.get("Minuti Goal Away"))
     if (h_raw is None or str(h_raw).strip() == "") and any(c in row for c in [f"gh{i}" for i in range(1,10)]):
-        hs = []
-        for i in range(1,10):
-            c = f"gh{i}"
-            if c in row and pd.notna(row[c]):
-                hs.append(row[c])
+        hs = [row[c] for c in [f"gh{i}" for i in range(1,10)] if c in row and pd.notna(row[c])]
         h_raw = ";".join(str(x) for x in hs) if hs else ""
     if (a_raw is None or str(a_raw).strip() == "") and any(c in row for c in [f"ga{i}" for i in range(1,10)]):
-        aa = []
-        for i in range(1,10):
-            c = f"ga{i}"
-            if c in row and pd.notna(row[c]):
-                aa.append(row[c])
+        aa = [row[c] for c in [f"ga{i}" for i in range(1,10)] if c in row and pd.notna(row[c])]
         a_raw = ";".join(str(x) for x in aa) if aa else ""
-
-    hm = _mins_list(h_raw)
-    am = _mins_list(a_raw)
-    h1 = hm[0] if hm else None
-    a1 = am[0] if am else None
-    if h1 is None and a1 is None:
-        return (None, None)
-    if h1 is None:
-        return ("Away", a1)
-    if a1 is None:
-        return ("Home", h1)
-    if h1 < a1:
-        return ("Home", h1)
-    if a1 < h1:
-        return ("Away", a1)
+    hm, am = _mins_list(h_raw), _mins_list(a_raw)
+    h1 = hm[0] if hm else None; a1 = am[0] if am else None
+    if h1 is None and a1 is None: return (None, None)
+    if h1 is None: return ("Away", a1)
+    if a1 is None: return ("Home", h1)
+    if h1 < a1: return ("Home", h1)
+    if a1 < h1: return ("Away", a1)
     return (None, None)
 
 def _team_df(df, team, side):
-    if side == "Home":
-        return df[df["Home"].astype(str) == str(team)].copy()
-    else:
-        return df[df["Away"].astype(str) == str(team)].copy()
+    return df[df["Home"].astype(str).eq(str(team))] if side=="Home" else df[df["Away"].astype(str).eq(str(team))]
 
 def _w_d_l(df, side):
-    if df.empty:
-        return (0.0, 0.0, 0.0)
+    if df.empty: return (0.0,0.0,0.0)
     if side == "Home":
         w = (df["Home Goal FT"] > df["Away Goal FT"]).mean()
         d = (df["Home Goal FT"] == df["Away Goal FT"]).mean()
@@ -556,52 +485,29 @@ def _w_d_l(df, side):
         w = (df["Away Goal FT"] > df["Home Goal FT"]).mean()
         d = (df["Away Goal FT"] == df["Home Goal FT"]).mean()
         l = (df["Away Goal FT"] < df["Home Goal FT"]).mean()
-    w = 0 if np.isnan(w) else float(w)
-    d = 0 if np.isnan(d) else float(d)
-    l = 0 if np.isnan(l) else float(l)
-    s = w + d + l
-    if s <= 0:
-        return (0.0, 0.0, 0.0)
-    return (w/s, d/s, l/s)
+    w, d, l = [0 if np.isnan(x) else float(x) for x in (w,d,l)]
+    s = w+d+l
+    return (w/s, d/s, l/s) if s>0 else (0.0,0.0,0.0)
 
 def _gf_ga(df, side):
-    if df.empty:
-        return (0.0, 0.0)
-    if side == "Home":
-        return (df["Home Goal FT"].mean(), df["Away Goal FT"].mean())
-    else:
-        return (df["Away Goal FT"].mean(), df["Home Goal FT"].mean())
+    if df.empty: return (0.0, 0.0)
+    return (df["Home Goal FT"].mean(), df["Away Goal FT"].mean()) if side=="Home" else (df["Away Goal FT"].mean(), df["Home Goal FT"].mean())
 
 def _shots(df, side):
-    cols = {  # FT totals
-        "h_shots": "suth", "a_shots": "suta",
-        "h_sot": "sutht", "a_sot": "sutat",
-    }
+    cols = {"h_shots": "suth", "a_shots": "suta", "h_sot": "sutht", "a_sot": "sutat"}
     for c in cols.values():
-        if c not in df.columns:
-            df[c] = np.nan
-
+        if c not in df.columns: df[c] = np.nan
     if side == "Home":
-        sf = df[cols["h_shots"]].astype(float)
-        sa = df[cols["a_shots"]].astype(float)
-        sotf = df[cols["h_sot"]].astype(float)
-        sota = df[cols["a_sot"]].astype(float)
+        sf, sa = df[cols["h_shots"]].astype(float), df[cols["a_shots"]].astype(float)
+        sotf, sota = df[cols["h_sot"]].astype(float), df[cols["a_sot"]].astype(float)
     else:
-        sf = df[cols["a_shots"]].astype(float)
-        sa = df[cols["h_shots"]].astype(float)
-        sotf = df[cols["a_sot"]].astype(float)
-        sota = df[cols["h_sot"]].astype(float)
-
+        sf, sa = df[cols["a_shots"]].astype(float), df[cols["h_shots"]].astype(float)
+        sotf, sota = df[cols["a_sot"]].astype(float), df[cols["h_sot"]].astype(float)
     pace = np.nanmean(sf + sa)
-    return {
-        "shots_for": np.nansum(sf), "shots_against": np.nansum(sa),
-        "sot_for": np.nansum(sotf), "sot_against": np.nansum(sota),
-        "pace_avg": pace
-    }
+    return {"shots_for": np.nansum(sf), "shots_against": np.nansum(sa), "sot_for": np.nansum(sotf), "sot_against": np.nansum(sota), "pace_avg": pace}
 
 def _btts_over(df):
-    if df.empty:
-        return (0.0, 0.0)
+    if df.empty: return (0.0, 0.0)
     btts = ((df["Home Goal FT"]>0) & (df["Away Goal FT"]>0)).mean()
     over25 = ((df["Home Goal FT"] + df["Away Goal FT"]) > 2.5).mean()
     return (0 if np.isnan(btts) else float(btts), 0 if np.isnan(over25) else float(over25))
@@ -617,20 +523,16 @@ def _reliability_stars(n):
 def _momentum_block(df, team, side, last_n=8):
     df_side = _team_df(df, team, side)
     n_all = len(df_side)
-    if n_all == 0:
-        return None
-    w0, d0, l0 = _w_d_l(df_side, side)
-    gf0, ga0 = _gf_ga(df_side, side)
-    if "Data" in df_side.columns:
-        df_side = df_side.sort_values("Data")
+    if n_all == 0: return None
+    w0, d0, l0 = _w_d_l(df_side, side); gf0, ga0 = _gf_ga(df_side, side)
+    if "Data" in df_side.columns: df_side = df_side.sort_values("Data")
     df_last = df_side.tail(last_n)
-    w1, d1, l1 = _w_d_l(df_last, side)
-    gf1, ga1 = _gf_ga(df_last, side)
-    delta = {"Win%": (w1 - w0) * 100, "Draw%": (d1 - d0) * 100, "Loss%": (l1 - l0) * 100, "GFΔ": gf1 - gf0, "GAΔ": ga1 - ga0}
+    w1, d1, l1 = _w_d_l(df_last, side); gf1, ga1 = _gf_ga(df_last, side)
+    delta = {"Δ Win%": (w1 - w0) * 100, "Δ Draw%": (d1 - d0) * 100, "Δ Loss%": (l1 - l0) * 100, "Δ GF": gf1 - gf0, "Δ GA": ga1 - ga0}
     elo_col = "ELO Home" if side=="Home" else "ELO Away"
     form_col = "Form Home" if side=="Home" else "Form Away"
     elo_delta = None; form_delta = None
-    if elo_col in df_side.columns:
+    if elo_col in df_side.columns: 
         e0 = df_side[elo_col].mean(); e1 = df_last[elo_col].mean()
         if not (np.isnan(e0) or np.isnan(e1)): elo_delta = e1 - e0
     if form_col in df_side.columns:
@@ -640,35 +542,28 @@ def _momentum_block(df, team, side, last_n=8):
     return {"n_all": n_all, "n_last": len(df_last), "delta": delta, "elo_delta": elo_delta, "form_delta": form_delta, "rel": rel}
 
 def _first_goal_tables(df, team_home, team_away):
-    if df.empty:
-        return None
+    if df.empty: return None
     work = df.copy()
-    if "Data" in work.columns:
-        work = work.sort_values("Data")
+    if "Data" in work.columns: work = work.sort_values("Data")
     who, minute = [], []
     for _, r in work.iterrows():
-        s, m = _first_goal_side_min(r)
-        who.append(s); minute.append(m)
+        s, m = _first_goal_side_min(r); who.append(s); minute.append(m)
     work["first_side"] = who; work["first_min"]  = minute
 
     def _outcome(row):
         if row["Home Goal FT"] > row["Away Goal FT"]: return "1"
         if row["Home Goal FT"] < row["Away Goal FT"]: return "2"
         return "X"
-
     work["FT"] = work.apply(_outcome, axis=1)
-    t_home = work[work["first_side"] == "Home"]
-    t_away = work[work["first_side"] == "Away"]
+
+    t_home = work[work["first_side"] == "Home"]; t_away = work[work["first_side"] == "Away"]
 
     def _pivot(a):
-        if a.empty:
-            return pd.DataFrame({"Esito": ["1","X","2"], "Freq %": [0,0,0]})
+        if a.empty: return pd.DataFrame({"Esito": ["1","X","2"], "Freq %": [0,0,0]})
         p = (a["FT"].value_counts(normalize=True) * 100).reindex(["1","X","2"]).fillna(0).reset_index()
-        p.columns = ["Esito","Freq %"]
-        return p
+        p.columns = ["Esito","Freq %"]; return p
 
-    tab_home = _pivot(t_home)
-    tab_away = _pivot(t_away)
+    tab_home = _pivot(t_home); tab_away = _pivot(t_away)
 
     bins = [(0,15),(16,30),(31,45),(46,60),(61,75),(76,90)]
     labels = [f"{a}-{b}" for a,b in bins]
@@ -677,27 +572,19 @@ def _first_goal_tables(df, team_home, team_away):
     for m in mm:
         for (a,b),lab in zip(bins, labels):
             if a < m <= b:
-                counts[lab] += 1
-                break
+                counts[lab] += 1; break
     hist = pd.DataFrame({"Finestra": labels, "Occorrenze": [counts[l] for l in labels]})
     return {"home_first": tab_home, "away_first": tab_away, "hist": hist}
 
 def _style_rhythm_block(df, team, side):
     df_side = _team_df(df, team, side)
-    if df_side.empty:
-        return None
+    if df_side.empty: return None
     shots = _shots(df_side, side)
     gf_sum = df_side["Home Goal FT"].sum() if side=="Home" else df_side["Away Goal FT"].sum()
     ga_sum = df_side["Away Goal FT"].sum() if side=="Home" else df_side["Home Goal FT"].sum()
-    conv = np.nan
-    if shots["sot_for"] and shots["sot_for"] > 0:
-        conv = gf_sum / shots["sot_for"]
-    savep = np.nan
-    if shots["sot_against"] and shots["sot_against"] > 0:
-        savep = 1.0 - (ga_sum / shots["sot_against"])
-    n = len(df_side)
-    pace_pm = shots["shots_for"] + shots["shots_against"]
-    pace_pm = (pace_pm / n) if n>0 else np.nan
+    conv = np.nan if not (shots["sot_for"] and shots["sot_for"]>0) else gf_sum / shots["sot_for"]
+    savep = np.nan if not (shots["sot_against"] and shots["sot_against"]>0) else 1.0 - (ga_sum / shots["sot_against"])
+    n = len(df_side); pace_pm = shots["shots_for"] + shots["shots_against"]; pace_pm = (pace_pm/n) if n>0 else np.nan
     btts, over25 = _btts_over(df_side)
     return {"pace": pace_pm, "conv": conv, "save": savep, "btts": btts, "over25": over25, "n": n}
 
@@ -705,132 +592,200 @@ def _calibration_one(df, market: str, k_bins=5):
     col_map = {"Home": "Odd home", "Draw": "Odd Draw", "Away": "Odd Away"}
     col = col_map.get(market)
     if not col or col not in df.columns:
-        return pd.DataFrame(columns=["Bin Quota","Implied %","Observed %","N","Brier"])
+        return pd.DataFrame(columns=["Bin Quota","Implied %","Observed %","Gap %","N","Brier"])
     d = df[[col, "Home Goal FT", "Away Goal FT"]].dropna().copy()
     if d.empty:
-        return pd.DataFrame(columns=["Bin Quota","Implied %","Observed %","N","Brier"])
-    if market == "Home":
-        d["y"] = (d["Home Goal FT"] > d["Away Goal FT"]).astype(int)
-    elif market == "Away":
-        d["y"] = (d["Away Goal FT"] > d["Home Goal FT"]).astype(int)
-    else:
-        d["y"] = (d["Home Goal FT"] == d["Away Goal FT"]).astype(int)
-    d["p"] = 1.0 / d[col].astype(float)
-    d = d[(d["p"]>0) & (d["p"]<=1.0)]
-    qs = np.linspace(0, 1, k_bins+1)
-    edges = d[col].quantile(qs).values
-    edges = np.unique(np.round(edges, 4))
-    if len(edges) < 3:
-        edges = np.array([d[col].min(), d[col].median(), d[col].max()])
+        return pd.DataFrame(columns=["Bin Quota","Implied %","Observed %","Gap %","N","Brier"])
+    if market == "Home": d["y"] = (d["Home Goal FT"] > d["Away Goal FT"]).astype(int)
+    elif market == "Away": d["y"] = (d["Away Goal FT"] > d["Home Goal FT"]).astype(int)
+    else: d["y"] = (d["Home Goal FT"] == d["Away Goal FT"]).astype(int)
+    d["p"] = 1.0 / d[col].astype(float); d = d[(d["p"]>0) & (d["p"]<=1.0)]
+    qs = np.linspace(0, 1, k_bins+1); edges = np.unique(np.round(d[col].quantile(qs).values, 4))
+    if len(edges) < 3: edges = np.array([d[col].min(), d[col].median(), d[col].max()])
     d["bin"] = pd.cut(d[col], bins=edges, include_lowest=True, duplicates="drop")
     res = []
     for b, g in d.groupby("bin"):
-        if g.empty: 
-            continue
+        if g.empty: continue
         implied = g["p"].mean(); obs = g["y"].mean()
         brier = np.mean((g["p"] - g["y"])**2)
-        res.append({"Bin Quota": str(b),"Implied %": round(implied*100,1),"Observed %": round(obs*100,1),"N": int(len(g)),"Brier": round(brier,4)})
+        res.append({"Bin Quota": str(b),"Implied %": round(implied*100,1),"Observed %": round(obs*100,1),
+                    "Gap %": round((obs-implied)*100,1), "N": int(len(g)), "Brier": round(brier,4)})
     return pd.DataFrame(res)
+
+# ========= helpers visuali per tabelle pro =========
+def _df_style_positive_negative(df: pd.DataFrame, pos_good_cols: list[str] = None, neg_good_cols: list[str] = None):
+    pos_good_cols = pos_good_cols or []; neg_good_cols = neg_good_cols or []
+    def _col(v, good="pos"):
+        if pd.isna(v): return ""
+        try: x = float(v)
+        except Exception: return ""
+        if good == "pos":
+            if x > 0: return "background-color:#073b1d;color:#c7ffe4;"
+            if x < 0: return "background-color:#4c0a0a;color:#ffd9d9;"
+        else:
+            if x < 0: return "background-color:#073b1d;color:#c7ffe4;"
+            if x > 0: return "background-color:#4c0a0a;color:#ffd9d9;"
+        return "background-color:#1f2937;color:#e5e7eb;"
+    sty = df.style
+    for c in pos_good_cols:
+        if c in df.columns: sty = sty.applymap(lambda v: _col(v, "pos"), subset=[c])
+    for c in neg_good_cols:
+        if c in df.columns: sty = sty.applymap(lambda v: _col(v, "neg"), subset=[c])
+    return sty.set_properties(**{"font-size":"12px"})
 
 def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
     st.markdown("### 🔬 Approfondimenti Macro KPI (complementari a 1X2)")
 
+    # 1) Momentum & Affidabilità — TABELLLE PRO
     st.subheader("1) 📈 Momentum & Affidabilità")
-    c1, c2 = st.columns(2)
     last_n = st.slider("Ultime N gare per Momentum", 6, 12, 8, key="mom_lastn")
-    with c1:
-        mH = _momentum_block(df_ctx, home_team, "Home", last_n=last_n)
-        if mH is None:
-            st.info(f"Nessun dato per **{home_team}** in casa.")
-        else:
-            st.markdown(f"**{home_team} @casa** — campione: {mH['n_all']} • recenti: {mH['n_last']} • affidabilità: {mH['rel']}")
-            rows = [["Δ Win%", f"{mH['delta']['Win%']:+.1f}%"],
-                    ["Δ Draw%", f"{mH['delta']['Draw%']:+.1f}%"],
-                    ["Δ Loss%", f"{mH['delta']['Loss%']:+.1f}%"],
-                    ["Δ GF", f"{mH['delta']['GFΔ']:+.2f}"],
-                    ["Δ GA", f"{mH['delta']['GAΔ']:+.2f}"]]
-            if mH["elo_delta"] is not None: rows.append(["Δ ELO", f"{mH['elo_delta']:+.1f}"])
-            if mH["form_delta"] is not None: rows.append(["Δ Form", f"{mH['form_delta']:+.2f}"])
-            st.table(pd.DataFrame(rows, columns=["KPI","Δ (ultime vs baseline)"]))
-    with c2:
-        mA = _momentum_block(df_ctx, away_team, "Away", last_n=last_n)
-        if mA is None:
-            st.info(f"Nessun dato per **{away_team}** in trasferta.")
-        else:
-            st.markdown(f"**{away_team} @trasferta** — campione: {mA['n_all']} • recenti: {mA['n_last']} • affidabilità: {mA['rel']}")
-            rows = [["Δ Win%", f"{mA['delta']['Win%']:+.1f}%"],
-                    ["Δ Draw%", f"{mA['delta']['Draw%']:+.1f}%"],
-                    ["Δ Loss%", f"{mA['delta']['Loss%']:+.1f}%"],
-                    ["Δ GF", f"{mA['delta']['GFΔ']:+.2f}"],
-                    ["Δ GA", f"{mA['delta']['GAΔ']:+.2f}"]]
-            if mA["elo_delta"] is not None: rows.append(["Δ ELO", f"{mA['elo_delta']:+.1f}"])
-            if mA["form_delta"] is not None: rows.append(["Δ Form", f"{mA['form_delta']:+.2f}"])
-            st.table(pd.DataFrame(rows, columns=["KPI","Δ (ultime vs baseline)"]))
+
+    mH = _momentum_block(df_ctx, home_team, "Home", last_n=last_n)
+    mA = _momentum_block(df_ctx, away_team, "Away", last_n=last_n)
+    c1, c2 = st.columns(2)
+
+    def _render_mom(block, title):
+        if block is None:
+            st.info(f"Nessun dato per **{title}**.")
+            return
+        base = {
+            "Δ Win%": block["delta"]["Win%"],
+            "Δ Draw%": block["delta"]["Draw%"],
+            "Δ Loss%": block["delta"]["Loss%"],
+            "Δ GF": block["delta"]["GFΔ"],
+            "Δ GA": block["delta"]["GAΔ"],
+        }
+        if block["elo_delta"] is not None: base["Δ ELO"] = block["elo_delta"]
+        if block["form_delta"] is not None: base["Δ Form"] = block["form_delta"]
+        base["N (ultime)"] = block["n_last"]; base["N (tot)"] = block["n_all"]; base["Affidabilità"] = block["rel"]
+        dfm = pd.DataFrame([base])
+
+        sty = _df_style_positive_negative(
+            dfm,
+            pos_good_cols=["Δ Win%","Δ GF","Δ ELO","Δ Form"],
+            neg_good_cols=["Δ Loss%","Δ GA"]
+        )
+        st.caption(f"**{title}** — campione: {block['n_all']} • recenti: {block['n_last']} • affidabilità: {block['rel']}")
+        st.dataframe(
+            sty, use_container_width=True, height=88,
+            column_config={
+                "Δ Win%": st.column_config.NumberColumn(format="+.1f"),
+                "Δ Draw%": st.column_config.NumberColumn(format="+.1f"),
+                "Δ Loss%": st.column_config.NumberColumn(format="+.1f"),
+                "Δ GF": st.column_config.NumberColumn(format="+.2f"),
+                "Δ GA": st.column_config.NumberColumn(format="+.2f"),
+                "Δ ELO": st.column_config.NumberColumn(format="+.1f"),
+                "Δ Form": st.column_config.NumberColumn(format="+.2f"),
+                "N (ultime)": st.column_config.NumberColumn(format="%.0f"),
+                "N (tot)": st.column_config.NumberColumn(format="%.0f"),
+            },
+        )
+
+    with c1: _render_mom(mH, f"{home_team} @casa")
+    with c2: _render_mom(mA, f"{away_team} @trasferta")
 
     st.divider()
 
+    # 2) Primo Gol → Esito — tabelle pro con progress bar + istogramma Altair
     st.subheader("2) ⏱️ Primo Gol → Esito (Pressione & Rimonte)")
     fg = _first_goal_tables(df_ctx, home_team, away_team)
     if fg is None:
         st.info("Dati minuti gol non disponibili.")
     else:
         c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**Se segna prima la squadra di Casa (Home-first)**")
-            st.table(fg["home_first"])
-        with c2:
-            st.markdown("**Se segna prima la squadra in Trasferta (Away-first)**")
-            st.table(fg["away_first"])
-        st.markdown("**Distribuzione minuto del primo gol** (finestre)")
-        st.bar_chart(fg["hist"].set_index("Finestra"))
+        def _render_fg(df_, title):
+            df_ = df_.copy()
+            df_["Freq %"] = df_["Freq %"].astype(float)
+            st.caption(title)
+            st.dataframe(
+                df_,
+                use_container_width=True,
+                height=150,
+                column_config={
+                    "Esito": st.column_config.TextColumn(),
+                    "Freq %": st.column_config.ProgressColumn(format="%.1f%%", min_value=0.0, max_value=100.0),
+                },
+            )
+        with c1: _render_fg(fg["home_first"], f"Se segna prima **{home_team}** (Home-first)")
+        with c2: _render_fg(fg["away_first"], f"Se segna prima **{away_team}** (Away-first)")
+
+        base = alt.Chart(fg["hist"]).mark_bar().encode(
+            x=alt.X("Finestra:N", title="Finestra minuto"), 
+            y=alt.Y("Occorrenze:Q", title="Occorrenze"),
+            tooltip=["Finestra","Occorrenze"]
+        ).properties(height=160, width="container")
+        st.altair_chart(base, use_container_width=True)
 
     st.divider()
 
+    # 3) Stile & Ritmo — tabelle pro una riga (kpi cards tabellari)
     st.subheader("3) ⚙️ Stile & Ritmo (pace / precisione SOT→Gol / save% / BTTS / Over2.5)")
     c1, c2 = st.columns(2)
-    with c1:
-        sH = _style_rhythm_block(df_ctx, home_team, "Home")
-        if sH is None:
-            st.info(f"Nessun dato per **{home_team}** in casa.")
-        else:
-            st.markdown(f"**{home_team} @casa** — campione: {sH['n']}")
-            df_card = pd.DataFrame([
-                ["Pace (tiri tot / match)", f"{sH['pace']:.2f}"],
-                ["Precisione SOT→Gol", f"{(sH['conv']*100):.1f}%"] if not np.isnan(sH["conv"]) else ["Precisione SOT→Gol", "N/D"],
-                ["Save% (approx)", f"{(sH['save']*100):.1f}%"] if not np.isnan(sH["save"]) else ["Save% (approx)", "N/D"],
-                ["BTTS%", f"{(sH['btts']*100):.1f}%"],
-                ["Over 2.5%", f"{(sH['over25']*100):.1f}%"],
-            ], columns=["KPI","Valore"])
-            st.table(df_card)
-    with c2:
-        sA = _style_rhythm_block(df_ctx, away_team, "Away")
-        if sA is None:
-            st.info(f"Nessun dato per **{away_team}** in trasferta.")
-        else:
-            st.markdown(f"**{away_team} @trasferta** — campione: {sA['n']}")
-            df_card = pd.DataFrame([
-                ["Pace (tiri tot / match)", f"{sA['pace']:.2f}"],
-                ["Precisione SOT→Gol", f"{(sA['conv']*100):.1f}%"] if not np.isnan(sA["conv"]) else ["Precisione SOT→Gol", "N/D"],
-                ["Save% (approx)", f"{(sA['save']*100):.1f}%"] if not np.isnan(sA["save"]) else ["Save% (approx)", "N/D"],
-                ["BTTS%", f"{(sA['btts']*100):.1f}%"],
-                ["Over 2.5%", f"{(sA['over25']*100):.1f}%"],
-            ], columns=["KPI","Valore"])
-            st.table(df_card)
+    def _render_style(block, title):
+        if block is None:
+            st.info(f"Nessun dato per **{title}**.")
+            return
+        dfk = pd.DataFrame([{
+            "Pace (tiri tot/match)": round(block["pace"], 2) if pd.notna(block["pace"]) else np.nan,
+            "Precisione SOT→Gol %": round(block["conv"]*100, 1) if not np.isnan(block["conv"]) else np.nan,
+            "Save % (approx)": round(block["save"]*100, 1) if not np.isnan(block["save"]) else np.nan,
+            "BTTS %": round(block["btts"]*100, 1),
+            "Over 2.5 %": round(block["over25"]*100, 1),
+            "Campione": int(block["n"])
+        }])
+        st.caption(title)
+        st.dataframe(
+            dfk, use_container_width=True, height=80,
+            column_config={
+                "Pace (tiri tot/match)": st.column_config.NumberColumn(format="%.2f"),
+                "Precisione SOT→Gol %": st.column_config.NumberColumn(format="%.1f"),
+                "Save % (approx)": st.column_config.NumberColumn(format="%.1f"),
+                "BTTS %": st.column_config.NumberColumn(format="%.1f"),
+                "Over 2.5 %": st.column_config.NumberColumn(format="%.1f"),
+                "Campione": st.column_config.NumberColumn(format="%.0f"),
+            },
+        )
+    with c1: _render_style(_style_rhythm_block(df_ctx, home_team, "Home"), f"**{home_team} @casa**")
+    with c2: _render_style(_style_rhythm_block(df_ctx, away_team, "Away"), f"**{away_team} @trasferta**")
 
     st.divider()
 
+    # 4) Calibration 1X2 — tabelle pro + mini chart
     st.subheader("4) 🎯 Calibration 1X2 (Quote → Outcome)")
     with st.expander("Mostra tabelle calibrazione per Home / Draw / Away", expanded=True):
         tabs = st.tabs(["Home", "Draw", "Away"])
-        with tabs[0]:
-            st.caption("Quanto sono calibrate le quote Home in questo contesto (implied vs observed, + Brier score).")
-            st.dataframe(_calibration_one(df_ctx, "Home"), use_container_width=True)
-        with tabs[1]:
-            st.caption("Quanto sono calibrate le quote Draw in questo contesto.")
-            st.dataframe(_calibration_one(df_ctx, "Draw"), use_container_width=True)
-        with tabs[2]:
-            st.caption("Quanto sono calibrate le quote Away in questo contesto.")
-            st.dataframe(_calibration_one(df_ctx, "Away"), use_container_width=True)
+        def _render_calib(market: str, t_idx: int):
+            dfc = _calibration_one(df_ctx, market)
+            with tabs[t_idx]:
+                st.caption(f"Calibrazione {market}: **implied vs observed**, gap e Brier score.")
+                if dfc.empty:
+                    st.info("Dati insufficienti.")
+                else:
+                    # tabella
+                    st.dataframe(
+                        dfc,
+                        use_container_width=True, height=220,
+                        column_config={
+                            "Implied %": st.column_config.NumberColumn(format="%.1f"),
+                            "Observed %": st.column_config.NumberColumn(format="%.1f"),
+                            "Gap %": st.column_config.NumberColumn(format="+.1f"),
+                            "N": st.column_config.NumberColumn(format="%.0f"),
+                            "Brier": st.column_config.NumberColumn(format="%.4f"),
+                        },
+                    )
+                    # mini chart
+                    ch = alt.Chart(dfc).transform_fold(
+                        ["Implied %","Observed %"], as_=["Serie","Valore"]
+                    ).mark_line(point=True).encode(
+                        x=alt.X("Bin Quota:N", title="Bin di quota"),
+                        y=alt.Y("Valore:Q", title="%"),
+                        color=alt.Color("Serie:N", legend=alt.Legend(orient="bottom")),
+                        tooltip=["Bin Quota","Serie","Valore"]
+                    ).properties(height=180, width="container")
+                    st.altair_chart(ch, use_container_width=True)
+        _render_calib("Home", 0)
+        _render_calib("Draw", 1)
+        _render_calib("Away", 2)
 
 
 # ==========================
@@ -840,16 +795,15 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     st.title("📊 Pre-Match – Analisi per Trader Professionisti")
 
     qin = _get_qparams()
-    _init_shared_quotes()  # prepara le quote condivise
+    _init_shared_quotes()
 
     if "country" not in df.columns:
-        st.error("Dataset senza colonna 'country'.")
-        st.stop()
+        st.error("Dataset senza colonna 'country'."); st.stop()
 
     df = df.copy()
     df["country"] = _ensure_str(df["country"]).str.strip().str.upper()
 
-    # === Campionato & Stagioni: SOLO dall’Hub ===
+    # Campionato & Stagioni: SOLO dall’Hub
     if USE_GLOBAL_FILTERS:
         league = (st.session_state.get(GLOBAL_CHAMP_KEY) or db_selected or "").strip().upper()
         seasons_from_hub = st.session_state.get(GLOBAL_SEASONS_KEY)
@@ -861,57 +815,40 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         df_league_all = df.copy()
         seasons_selected = seasons_from_hub or None
     else:
-        # (modalità legacy eventuale)
         league = (db_selected or "").strip().upper()
         df = df[df["country"] == league]
-        if df.empty:
-            st.warning(f"Nessun dato per il campionato '{league}'.")
-            st.stop()
+        if df.empty: st.warning(f"Nessun dato per '{league}'."); st.stop()
         df_league_all = df.copy()
         seasons_selected = None
         if "Stagione" in df.columns:
             seasons_desc = _seasons_desc(df["Stagione"].dropna().unique().tolist())
             latest = seasons_desc[0] if seasons_desc else None
             with st.expander("⚙️ Filtro Stagioni", expanded=True):
-                st.markdown("Seleziona la profondità storica da analizzare. **Intervallo rapido** parte dalla **stagione più recente** verso il passato.")
+                st.markdown("Intervallo rapido parte dalla **stagione più recente**.")
                 colA, colB = st.columns([2, 1])
                 with colA:
-                    seasons_selected = st.multiselect(
-                        "Seleziona stagioni (Manuale)",
-                        options=seasons_desc,
-                        default=[latest] if latest else [],
-                        key=_k("stagioni_manual"),
-                    )
+                    seasons_selected = st.multiselect("Seleziona stagioni (Manuale)", options=seasons_desc, default=[latest] if latest else [], key=_k("stagioni_manual"))
                 with colB:
-                    preset = st.selectbox(
-                        "Intervallo rapido",
-                        options=["Tutte", "Stagione in corso", "Ultime 10", "Ultime 5", "Ultime 3", "Ultime 2", "Ultime 1"],
-                        index=0,
-                        key=_k("stagioni_preset"),
-                    )
+                    preset = st.selectbox("Intervallo rapido", ["Tutte","Stagione in corso","Ultime 10","Ultime 5","Ultime 3","Ultime 2","Ultime 1"], index=0, key=_k("stagioni_preset"))
                     if preset == "Stagione in corso":
                         seasons_selected = _pick_current_season(seasons_desc)
                     elif preset != "Tutte" and seasons_desc:
-                        try:
-                            n = int(preset.split()[-1])
-                        except Exception:
-                            n = 1
+                        try: n = int(preset.split()[-1])
+                        except Exception: n = 1
                         seasons_selected = seasons_desc[:n]
                 if seasons_selected:
                     st.caption(f"Stagioni attive: **{', '.join(seasons_selected)}**")
                     df = df[df["Stagione"].astype(str).isin(seasons_selected)]
                 else:
-                    st.caption("Filtro stagioni: **Tutte**")
-                    seasons_selected = None
+                    st.caption("Filtro stagioni: **Tutte**"); seasons_selected = None
 
     df["Home"] = _ensure_str(df["Home"]).str.strip()
     df["Away"] = _ensure_str(df["Away"]).str.strip()
     if "Label" not in df.columns:
         df["Label"] = df.apply(label_match, axis=1)
 
-    # ======== Ricerca rapida + assegnazione ruolo ========
+    # Ricerca rapida + assegnazione
     all_teams = sorted(set(df["Home"].dropna().unique()) | set(df["Away"].dropna().unique()))
-
     if st.session_state.get(_k("swap_trigger")):
         st.session_state.pop(_k("squadra_casa"), None)
         st.session_state.pop(_k("squadra_ospite"), None)
@@ -925,8 +862,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 flt = str(team_filter).strip().lower()
                 filtered = [t for t in all_teams if flt in t.lower()]
                 if not filtered:
-                    st.info("Nessuna squadra trovata. Mostro tutte.")
-                    filtered = all_teams
+                    st.info("Nessuna squadra trovata. Mostro tutte."); filtered = all_teams
             else:
                 filtered = all_teams
             selected_from_search = st.selectbox("Risultati ricerca", options=filtered, key=_k("search_pick"))
@@ -938,27 +874,24 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                     if role == "Casa":
                         other = st.session_state.get(_k("squadra_ospite"))
                         if other == selected_from_search:
-                            st.warning("⚠️ La stessa squadra è già selezionata come Ospite. Cambia Ospite o usa 'Inverti'.")
+                            st.warning("⚠️ La stessa squadra è già selezionata come Ospite.")
                         else:
                             st.session_state[_k("squadra_casa")] = selected_from_search
                     else:
                         other = st.session_state.get(_k("squadra_casa"))
                         if other == selected_from_search:
-                            st.warning("⚠️ La stessa squadra è già selezionata come Casa. Cambia Casa o usa 'Inverti'.")
+                            st.warning("⚠️ La stessa squadra è già selezionata come Casa.")
                         else:
                             st.session_state[_k("squadra_ospite")] = selected_from_search
                     _set_qparams(q=team_filter or "")
-                    try:
-                        st.rerun()
-                    except Exception:
-                        st.experimental_rerun()
+                    try: st.rerun()
+                    except Exception: st.experimental_rerun()
                 except Exception:
                     st.warning("Impossibile assegnare la squadra. Riprova.")
 
-    # ======== Selettori Squadre finali + Swap ========
+    # Selettori Squadre finali + Swap
     default_home = 0
     default_away = 1 if len(all_teams) > 1 else 0
-
     col_sel1, col_swap, col_sel2 = st.columns([2, 0.5, 2])
     with col_sel1:
         squadra_casa = st.selectbox("Seleziona Squadra Casa", options=all_teams, index=default_home, key=_k("squadra_casa"))
@@ -968,26 +901,20 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             current_home = st.session_state.get(_k("squadra_casa"), all_teams[default_home])
             current_away = st.session_state.get(_k("squadra_ospite"), all_teams[default_away])
             if current_home == current_away:
-                st.warning("⚠️ Casa e Ospite sono uguali: invertire non ha effetto.")
+                st.warning("⚠️ Casa e Ospite sono uguali.")
             else:
                 _set_qparams(home=current_away, away=current_home)
                 st.session_state[_k("swap_trigger")] = True
-                try:
-                    st.rerun()
-                except Exception:
-                    st.experimental_rerun()
+                try: st.rerun()
+                except Exception: st.experimental_rerun()
     with col_sel2:
         squadra_ospite = st.selectbox("Seleziona Squadra Ospite", options=all_teams, index=default_away, key=_k("squadra_ospite"))
 
     if squadra_casa == squadra_ospite:
-        st.error("❌ Casa e Ospite non possono essere la stessa squadra. Modifica la selezione o usa 'Inverti'.")
-        return
+        st.error("❌ Casa e Ospite non possono essere la stessa squadra."); return
 
-    # ======== Quote 1X2 e Quote Over/BTTS condivise ========
-    st.markdown(
-        "Le quote 1X2 servono per **classificare** il match in un *label* (es. H_Fav, A_Fav, Balanced). "
-        "Le **quote Over/BTTS** inserite qui sotto sono **condivise** e usate in tutti i tab (ROI, EV, Statistiche)."
-    )
+    # Quote 1X2 + Over/BTTS condivise
+    st.markdown("Le quote 1X2 **classificano** il match (label). Le **quote Over/BTTS** qui sotto sono **condivise** in tutti i tab.")
     c1, c2, c3 = st.columns(3)
     with c1:
         odd_home = st.number_input("Quota Vincente Casa", min_value=1.01, step=0.01, value=2.00, key=_k("quota_home"))
@@ -1001,14 +928,10 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
 
     st.markdown("### Quote Over/BTTS (condivise)")
     q1, q2, q3, q4 = st.columns(4)
-    with q1:
-        _shared_number_input("Quota Over 1.5", "ov15", _k("shared:q_ov15"))
-    with q2:
-        _shared_number_input("Quota Over 2.5", "ov25", _k("shared:q_ov25"))
-    with q3:
-        _shared_number_input("Quota Over 3.5", "ov35", _k("shared:q_ov35"))
-    with q4:
-        _shared_number_input("Quota BTTS",     "btts", _k("shared:q_btts"))
+    with q1: _shared_number_input("Quota Over 1.5", "ov15", _k("shared:q_ov15"))
+    with q2: _shared_number_input("Quota Over 2.5", "ov25", _k("shared:q_ov25"))
+    with q3: _shared_number_input("Quota Over 3.5", "ov35", _k("shared:q_ov35"))
+    with q4: _shared_number_input("Quota BTTS",     "btts", _k("shared:q_btts"))
 
     label = _label_from_odds(float(odd_home), float(odd_away))
     label_t = _label_type(label)
@@ -1020,26 +943,19 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     header_cols[3].markdown(f"**Away:** `{squadra_ospite}`")
 
     if label == "Others" or label not in set(df["Label"]):
-        st.info("⚠️ Nessuna partita trovata per questo label nel campionato: uso l'intero campionato.")
+        st.info("⚠️ Nessuna partita trovata per questo label: uso l'intero campionato.")
         label = None
 
-    # ======== Tabs (compresi Live e Correct Score) ========
+    # Tabs
     tab_1x2, tab_roi, tab_ev, tab_stats, tab_cs, tab_live = st.tabs(
         ["1X2", "ROI mercati", "EV storico squadre", "Statistiche squadre", "Correct Score", "Live da Minuto"]
     )
 
-    # ==========================
-    # TAB 1: 1X2 + macro KPI (+ KPI PLUS)
-    # ==========================
+    # === TAB 1: 1X2 + Macro KPI (+ Plus) ===
     with tab_1x2:
-        st.markdown(
-            "**Cosa vedi qui**: confronto 1X2 tra campionato/label e le due squadre nel loro contesto "
-            "(Casa per la squadra Home, Trasferta per la squadra Away). "
-            "**Win%** sono le frequenze storiche; **Back/Lay ROI** sono profitti medi per scommessa."
-        )
+        st.markdown("**Cosa vedi**: confronto 1X2 tra campionato/label e le due squadre nel loro contesto (Home@Casa, Away@Trasferta). **Win%** = frequenze storiche; **Back/Lay ROI** = profitti medi per scommessa.")
 
         df_league_scope = df[df["Label"] == label] if label else df
-
         cols_1x2 = ["Home","Away","Home Goal FT","Away Goal FT","Odd home","Odd Draw","Odd Away","Label"]
         df_league_light = df_league_scope[cols_1x2].copy()
         profits_back, rois_back, profits_lay, rois_lay, matches_league = _calc_back_lay_1x2_cached(df_league_light)
@@ -1072,7 +988,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         else:
             df_home = df[df["Home"] == squadra_casa]
         df_home_light = df_home[cols_1x2].copy()
-
         profits_back, rois_back, profits_lay, rois_lay, matches_home = _calc_back_lay_1x2_cached(df_home_light)
         row_home = {"LABEL": squadra_casa, "MATCHES": matches_home}
         if matches_home > 0:
@@ -1100,7 +1015,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         else:
             df_away = df[df["Away"] == squadra_ospite]
         df_away_light = df_away[cols_1x2].copy()
-
         profits_back, rois_back, profits_lay, rois_lay, matches_away = _calc_back_lay_1x2_cached(df_away_light)
         row_away = {"LABEL": squadra_ospite, "MATCHES": matches_away}
         if matches_away > 0:
@@ -1135,24 +1049,19 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         ])
 
         st.dataframe(
-            df_long,
-            use_container_width=True,
-            height=420,
-            column_config={
-                "Matches": st.column_config.NumberColumn(format="%.0f"),
-                "Win %": st.column_config.NumberColumn(format="%.2f"),
-            },
+            df_long, use_container_width=True, height=420,
+            column_config={"Matches": st.column_config.NumberColumn(format="%.0f"),
+                           "Win %": st.column_config.NumberColumn(format="%.2f")}
         )
         _download_df_button(df_long, "1x2_overview.csv", "⬇️ Scarica 1X2 CSV")
 
         st.divider()
         st.subheader("📌 Macro KPI Squadre")
-        st.markdown("Media goal fatti/subiti, esito 1X2 e BTTS% della squadra nel contesto **Home@Casa / Away@Trasferta**.")
+        st.markdown("Media goal fatti/subiti, esito 1X2 e BTTS% per **Home@Casa** e **Away@Trasferta**.")
 
         @st.cache_data(show_spinner=False, ttl=900)
         def _macro_stats_cached(df_light: pd.DataFrame, team: str, side: str):
             if compute_team_macro_stats is None:
-                # mini fallback
                 d = df_light.copy()
                 if side == "Home":
                     d = d[d["Home"] == team]
@@ -1183,42 +1092,31 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         stats_home = _macro_stats_cached(df_stats_light, squadra_casa, "Home")
         stats_away = _macro_stats_cached(df_stats_light, squadra_ospite, "Away")
         if not stats_home or not stats_away:
-            st.info("⚠️ Una delle due squadre non ha match disponibili per il confronto.")
+            st.info("⚠️ Una delle due squadre non ha match disponibili.")
         else:
             df_comp = pd.DataFrame({squadra_casa: stats_home, squadra_ospite: stats_away})
             st.dataframe(df_comp, use_container_width=True, height=320)
             _download_df_button(df_comp.reset_index(), "macro_kpi.csv", "⬇️ Scarica Macro KPI CSV")
 
-        # 🔥 Macro KPI PLUS: i 4 blocchi aggiuntivi (inclusa Precisione SOT→Gol)
         st.divider()
+        # 🔥 KPI PLUS — versioni con tabelle professionali
         render_macro_kpi_plus(df_league_all, squadra_casa, squadra_ospite)
 
-    # ==========================
-    # TAB 2: ROI mercati
-    # ==========================
+    # === TAB 2: ROI mercati ===
     with tab_roi:
-        st.markdown(
-            "**Cosa vedi qui**: ROI storico per mercati **Over/BTTS**.\n\n"
-            "- **Scope Campionato/Label**: tutte le partite del campionato (o del label selezionato).\n"
-            "- **Scope Squadra**: partite della squadra Casa **giocate in Casa** e della squadra Ospite **giocate in Trasferta**.\n"
-            "I ROI sono calcolati come profitto medio per scommessa (commissione default 4.5%)."
-        )
+        st.markdown("**Cosa vedi**: ROI storico per mercati **Over/BTTS**. Scope *Campionato/Label* e *Squadra @Casa/Trasferta*.")
         commission = 0.045
-
         df_ev_scope = df[df["Label"] == label].copy() if label else df.copy()
         df_ev_scope = df_ev_scope.dropna(subset=["Home Goal FT", "Away Goal FT"])
-
         OVER15_COLS = ("cotao1", "Odd Over 1.5", "odd over 1,5", "Over 1.5")
         OVER25_COLS = ("cotao",  "Odd Over 2.5", "odd over 2,5", "Over 2.5")
         OVER35_COLS = ("cotao3", "Odd Over 3.5", "odd over 3,5", "Over 3.5")
         BTTS_YES_COLS = ("gg", "GG", "odd goal", "BTTS Yes", "Odd BTTS Yes")
-
         shared = _get_shared_quotes()
         q_ov15, q_ov25, q_ov35, q_btts = shared["ov15"], shared["ov25"], shared["ov35"], shared["btts"]
 
         def _light(df_in: pd.DataFrame, extra_cols: tuple[str, ...]) -> pd.DataFrame:
-            base = ["Home Goal FT","Away Goal FT"]
-            cols = list({*base, *extra_cols})
+            base = ["Home Goal FT","Away Goal FT"]; cols = list({*base, *extra_cols})
             return df_in[[c for c in cols if c in df_in.columns]].copy()
 
         df_roi_league = pd.DataFrame([
@@ -1248,11 +1146,10 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         df_roi_away.insert(0, "Scope", f"{squadra_ospite} @Trasferta")
 
         df_roi_all = pd.concat([df_roi_league, df_roi_home, df_roi_away], ignore_index=True)
+        df_roi_all["Mercato"] = df_roi_all["Mercato"].astype(str).str.replace(r"\s+", " ", regex=True)
 
         st.dataframe(
-            df_roi_all,
-            use_container_width=True,
-            height=420,
+            df_roi_all, use_container_width=True, height=420,
             column_config={
                 "Quota Media": st.column_config.NumberColumn(format="%.2f"),
                 "Esiti %": st.column_config.TextColumn(),
@@ -1263,22 +1160,16 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         )
         _download_df_button(df_roi_all, "roi_markets_all_scopes.csv", "⬇️ Scarica ROI mercati (tutti gli scope)")
 
-    # ==========================
-    # TAB 3: EV Storico – Squadre + KPI Best EV
-    # ==========================
+    # === TAB 3: EV storico squadre ===
     with tab_ev:
-        st.markdown(
-            "**Cosa vedi qui**: stime di Probabilità (%) per Home@Casa, Away@Trasferta, Blended, Head-to-Head. "
-            "EV = quota × p − 1. Colonna **Qualità** = solidità del campione."
-        )
+        st.markdown("**Cosa vedi**: stime di Probabilità (%) per Home@Casa, Away@Trasferta, Blended, Head-to-Head. EV = quota × p − 1.")
         use_label = st.checkbox("Usa il filtro Label (se disponibile)", value=True if label else False, key=_k("use_label_ev_squadre"))
         last_n = st.slider("Limita agli ultimi N match (0 = tutti)", 0, 50, 0, key=_k("last_n_ev"))
 
         def _limit_last_n(df_in: pd.DataFrame, n: int) -> pd.DataFrame:
             if n and n > 0 and "Data" in df_in.columns:
                 s = pd.to_datetime(df_in["Data"], errors="coerce")
-                tmp = df_in.copy()
-                tmp["_data_"] = s
+                tmp = df_in.copy(); tmp["_data_"] = s
                 tmp = tmp.sort_values("_data_", ascending=False).drop(columns=["_data_"])
                 return tmp.head(n)
             return df_in
@@ -1292,10 +1183,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         df_home_ctx = _limit_last_n(df_home_ctx.dropna(subset=["Home Goal FT", "Away Goal FT"]), last_n)
         df_away_ctx = _limit_last_n(df_away_ctx.dropna(subset=["Home Goal FT", "Away Goal FT"]), last_n)
 
-        df_h2h = df[
-            ((df["Home"] == squadra_casa) & (df["Away"] == squadra_ospite)) |
-            ((df["Home"] == squadra_ospite) & (df["Away"] == squadra_casa))
-        ].copy()
+        df_h2h = df[((df["Home"] == squadra_casa) & (df["Away"] == squadra_ospite)) | ((df["Home"] == squadra_ospite) & (df["Away"] == squadra_casa))].copy()
         if use_label and label:
             df_h2h = df_h2h[df_h2h["Label"] == label]
         df_h2h = _limit_last_n(df_h2h.dropna(subset=["Home Goal FT", "Away Goal FT"]), last_n)
@@ -1309,8 +1197,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         h2h_light       = df_h2h[base_cols].copy()
 
         df_ev_squadre, best = _build_ev_table_cached(
-            home_ctx_light, away_ctx_light, h2h_light,
-            squadra_casa, squadra_ospite,
+            home_ctx_light, away_ctx_light, h2h_light, squadra_casa, squadra_ospite,
             quota_ov15, quota_ov25, quota_ov35, quota_btts
         )
 
@@ -1331,17 +1218,14 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                     </div>
                     <div style="font-size:12px;opacity:.8;margin-top:6px;">Nota: EV calcolato su storico; valida sempre la dimensione campione.</div>
                 </div>
-                """,
-                unsafe_allow_html=True
+                """, unsafe_allow_html=True
             )
         else:
             st.info("Nessun EV positivo tra Blended e H2H con le quote inserite.")
 
         st.subheader("📋 EV storico per mercato e scope")
         st.dataframe(
-            df_ev_squadre,
-            use_container_width=True,
-            height=380,
+            df_ev_squadre, use_container_width=True, height=380,
             column_config={
                 "Quota": st.column_config.NumberColumn(format="%.2f"),
                 f"{squadra_casa} @Casa %": st.column_config.NumberColumn(format="%.2f"),
@@ -1354,20 +1238,11 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         )
         _download_df_button(df_ev_squadre, "ev_storico_squadre.csv", "⬇️ Scarica EV Storico CSV")
 
-    # ==========================
-    # TAB 4: Statistiche squadre (usa squadre.py / team_stats.py)
-    # ==========================
+    # === TAB 4: Statistiche squadre ===
     with tab_stats:
-        render_team_stats_tab(
-            df_league_all,     # campionato filtrato corrente
-            league,
-            squadra_casa,
-            squadra_ospite,
-        )
+        render_team_stats_tab(df_league_all, league, squadra_casa, squadra_ospite)
 
-    # ==========================
-    # TAB 5: Correct Score
-    # ==========================
+    # === TAB 5: Correct Score ===
     with tab_cs:
         st.subheader("Correct Score – Poisson + Dixon-Coles")
         st.caption("Stima λ con shrink verso media di lega + forma recente. Heatmap, top score e EV sui punteggi corretti.")
@@ -1375,21 +1250,12 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             st.info("Modulo Correct Score non disponibile in questo ambiente.")
         else:
             run_correct_score_panel(
-                df=df_league_all,
-                league_code=league,
-                home_team=squadra_casa,
-                away_team=squadra_ospite,
-                seasons=seasons_selected or None,
-                default_rho=-0.05,
-                default_kappa=3.0,
-                default_recent_weight=0.25,
-                default_recent_n=6,
-                default_max_goals=6,
+                df=df_league_all, league_code=league, home_team=squadra_casa, away_team=squadra_ospite,
+                seasons=seasons_selected or None, default_rho=-0.05, default_kappa=3.0,
+                default_recent_weight=0.25, default_recent_n=6, default_max_goals=6,
             )
 
-    # ==========================
-    # TAB 6: Live da Minuto
-    # ==========================
+    # === TAB 6: Live da Minuto ===
     with tab_live:
         st.markdown("**Analisi Live** — precompilata con i dati selezionati sopra.")
         st.session_state["campionato_corrente"] = league
@@ -1401,7 +1267,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
 
         cL1, cL2 = st.columns([1,1])
         with cL1:
-            live_minute = st.slider("⏲️ Minuto (prefill)", min_value=1, max_value=120, value=45, key=_k("live:min"))
+            live_minute = st.slider("⏲️ Minuto (prefill)", 1, 120, 45, key=_k("live:min"))
             st.session_state["minlive"] = int(live_minute)
         with cL2:
             live_score = st.text_input("📟 Risultato live (prefill)", value="0-0", key=_k("live:score"))
@@ -1414,20 +1280,17 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             _orig_set_cfg = getattr(st, "set_page_config", None)
             try:
                 def _noop(*args, **kwargs): return None
-                st.set_page_config = _noop  # no-op locale
-                _run_live(df_league_all)     # esegui modulo live
+                st.set_page_config = _noop
+                _run_live(df_league_all)
             except Exception as e:
                 st.warning(f"Modulo Live caricato con avviso: {e}")
             finally:
                 if _orig_set_cfg:
                     st.set_page_config = _orig_set_cfg
 
-    # Aggiorna query params (opzionale)
     shared = _get_shared_quotes()
     _set_qparams(
-        league=league,
-        home=squadra_casa,
-        away=squadra_ospite,
+        league=league, home=squadra_casa, away=squadra_ospite,
         q=st.session_state.get(_k("search_team"), "") or "",
         qh=odd_home, qd=odd_draw, qa=odd_away,
         ov15=shared["ov15"], ov25=shared["ov25"], ov35=shared["ov35"], btts=shared["btts"],
