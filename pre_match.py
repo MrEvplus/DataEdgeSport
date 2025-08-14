@@ -791,13 +791,13 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
             pos_good_cols=["Δ Win%","Δ GF","Δ ELO","Δ Form"],
             neg_good_cols=["Δ Loss%","Δ GA"]
         ).format({
-            "Δ Win%":  "{:+.1f}",
-            "Δ Draw%": "{:+.1f}",
-            "Δ Loss%": "{:+.1f}",
-            "Δ GF":    "{:+.2f}",
-            "Δ GA":    "{:+.2f}",
-            "Δ ELO":   "{:+.1f}",
-            "Δ Form":  "{:+.2f}",
+            "Δ Win%":   "{:+.1f}",
+            "Δ Draw%":  "{:+.1f}",
+            "Δ Loss%":  "{:+.1f}",
+            "Δ GF":     "{:+.2f}",
+            "Δ GA":     "{:+.2f}",
+            "Δ ELO":    "{:+.1f}",
+            "Δ Form":   "{:+.2f}",
             "N (ultime)": "{:.0f}",
             "N (tot)":    "{:.0f}",
         })
@@ -806,8 +806,9 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
         st.caption(
             f"**{title}** — campione: {base['N (tot)']} • recenti: {base['N (ultime)']} • affidabilità: {base['Affidabilità']}"
         )
+        # Passo LO STESSO Styler (sty). Niente doppia formattazione sulle Δ:
         st.dataframe(
-            styled,
+            sty,
             use_container_width=True,
             height=88,
             column_config={
