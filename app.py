@@ -163,11 +163,13 @@ st.sidebar.title("⚽ ProTrader — Hub")
 # -------------------------------------------------------
 # ORIGINE DATI (solo qui nel sidebar)
 # -------------------------------------------------------
+# --- ORIGINE DATI (sidebar) ---
+# app.py (estratto)
 origine_dati = st.sidebar.radio("Origine dati", ["Supabase", "Upload Manuale"], key="origine_dati")
 if origine_dati == "Supabase":
-    df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase")
+    df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase", ui_mode="minimal")
 else:
-    df, db_selected = load_data_from_file()
+    df, db_selected = load_data_from_file(ui_mode="minimal")
 
 # -------------------------------------------------------
 # MAPPING COLONNE E PULIZIA (esteso, come richiesto)
