@@ -640,7 +640,7 @@ def run_live_minute_analysis(df: pd.DataFrame):
                 {"Esito":"2","p_main":pA_L,"n_main":len(df_matched),"p_side":pA_A,"n_side":len(df_away_side),"p_final":p_away,"prior":priors["2"],"Δ":p_away-priors["2"]},
             ])
             # formatto SOLO le colonne numeriche (evito l'errore sulle stringhe)
-num_cols = [c for c in expl.columns if pd.api.types.is_numeric_dtype(expl[c])]
+            num_cols = [c for c in expl.columns if pd.api.types.is_numeric_dtype(expl[c])]
 fmt = {c: "{:.3f}" for c in num_cols}
 st.dataframe(expl.style.format(fmt), use_container_width=True)
 
