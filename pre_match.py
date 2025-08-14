@@ -705,11 +705,25 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
 
         dfm = pd.DataFrame([base])
 
+        # --- Stile + FORMATTING numerico con segno e decimali (fix +.1f) ---
         sty = _df_style_positive_negative(
             dfm,
             pos_good_cols=["Δ Win%","Δ GF","Δ ELO","Δ Form"],
             neg_good_cols=["Δ Loss%","Δ GA"]
         )
+        sty = sty.format({
+            "Δ Win%":  "{:+.1f}",
+            "Δ Draw%": "{:+.1f}",
+            "Δ Loss%": "{:+.1f}",
+            "Δ GF":    "{:+.2f}",
+            "Δ GA":    "{:+.2f}",
+            "Δ ELO":   "{:+.1f}",
+            "Δ Form":  "{:+.2f}",
+            "N (ultime)": "{:.0f}",
+            "N (tot)":    "{:.0f}",
+        })
+        # ---------------------------------------------------------------
+
         st.caption(
             f"**{title}** — campione: {base['N (tot)']} • recenti: {base['N (ultime)']} • affidabilità: {base['Affidabilità']}"
         )
