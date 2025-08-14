@@ -1,4 +1,4 @@
-# analisi_live_minuto.py — v3.9 ProTrader (UI polish)
+# analisi_live_minuto.py — v4.0 ProTrader (High-contrast Segnali + spiegazioni)
 # UI professionale a TAB per trader di calcio + EV 1X2 Back/Lay, Over 0.5/1.5/2.5/3.5, BTTS
 # EV Advisor (AI score), CS/Hedge, segnali esterni (pattern/squadre/macros), write-back per Pre-Match.
 # LOGICA PREESISTENTE INVARIATA, SOLO ESTENSIONI/UX.
@@ -45,7 +45,7 @@ _BASE_CSS = """
 div.stTabs [role="tablist"] button {font-weight:600;}
 .badge {display:inline-flex; align-items:center; gap:.5rem; padding:.25rem .6rem; border-radius:999px; font-size:.82rem; border:1px solid var(--chip-border); background:var(--chip); color:var(--text);}
 .badge b {color:#fff;}
-.small {color:var(--muted); font-size:.85rem;}
+.small {color: var(--muted); font-size:.85rem;}
 .ev-pill {padding:.2rem .45rem; border-radius:.5rem; background:var(--chip); border:1px solid var(--chip-border); font-size:.78rem; color:var(--text);}
 table td, table th {vertical-align: middle;}
 .dataframe td {font-size: 0.92rem;}
@@ -55,16 +55,25 @@ table td, table th {vertical-align: middle;}
 .kpi .mid {background:var(--warn);}
 .kpi .low {background:var(--danger);}
 .hint {color: var(--muted); font-size: .9rem;}
-.card {background: var(--card); border: 1px solid var(--chip-border); border-radius: .9rem; padding: 1rem;}
+
+/* Cards */
+.card {background: var(--card); border: 1px solid var(--chip-border); border-radius: .9rem; padding: 1rem; color: var(--text);}
 .card h4 {margin: 0 0 .5rem 0; font-size: 1.05rem;}
-.grid {display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap:.5rem .75rem;}
-.kv {display:flex; justify-content:space-between; gap:.5rem; font-size:.95rem;}
-.kv span:first-child {color: var(--muted);}
+.card .grid {display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap:.5rem .75rem;}
+.card .kv {display:flex; justify-content:space-between; gap:.5rem; font-size:.95rem;}
+.card .kv span:first-child {color: var(--muted);}
+
+/* High-contrast light variant (per Segnali) */
+.card.light {background: #f9fafb; border: 1px solid #e5e7eb; color: #111827;}
+.card.light .kv span:first-child {color: #6b7280;}
+.card.light h4 {color:#0f172a;}
+
+/* Pattern pills */
 .pills {display:flex; flex-wrap:wrap; gap:.5rem;}
-.pill {padding:.25rem .55rem; border-radius:999px; border:1px solid var(--chip-border); background:var(--chip); font-size:.75rem;}
-.good {background: var(--accent-soft);}
-.warn {background: var(--warn-soft);}
-.bad  {background: var(--danger-soft);}
+.pill {padding:.3rem .6rem; border-radius:999px; border:1px solid #e5e7eb; background:#f3f4f6; color:#111827; font-size:.78rem;}
+.pill.good {background: #e8f7ee; border-color:#bbf7d0;}
+.pill.warn {background: #fff4e5; border-color:#fde68a;}
+.pill.bad {background: #ffe8e8; border-color:#fecaca;}
 </style>
 """
 
@@ -149,8 +158,8 @@ def ev_back(prob, odds, commission=0.0):
 
 def ev_lay(prob, odds, commission=0.0):
     odds = max(1.01, float(odds or 1.01))
-    L = max(odds - 1.0, 1e-9)   # liability per 1 stake
-    s = 1.0 / L                 # lay stake per liability 1
+    L = max(odds - 1.0, 1e-9)
+    s = 1.0 / L
     return (1 - prob) * s * (1.0 - commission) - prob * 1.0
 
 def kelly_fraction(prob, odds):
@@ -185,7 +194,7 @@ def get_external_signals(df_league, home_team, away_team):
         m_away = compute_team_macro_stats(df_league, away_team, "Away")
         out["macro_home"] = m_home
         out["macro_away"] = m_away
-        if m_home and m_away:
+        if m_home or m_away:
             out["notes"].append("Macro KPI caricati")
     except Exception:
         pass
@@ -195,7 +204,7 @@ def get_external_signals(df_league, home_team, away_team):
         if hasattr(pa, "live_signals"):
             sig = pa.live_signals(df_league, home_team, away_team)
             out["pattern_signals"] = sig
-            out["notes"].append("Pattern live attivi" if sig else "Pattern: nessun segnale forte")
+            out["notes"].append("Pattern live rilevati" if sig else "Nessun pattern forte")
     except Exception:
         pass
     # Bias lega (macros.py)
@@ -300,27 +309,34 @@ def _style_table(df_):
             sty = sty.apply(_bg_posneg, subset=[c])
     return sty
 
-# ======== helpers Segnali (solo UI) ========
+# ======== helpers Segnali (UI) ========
 def _pct_str(x):
     try:
         return f"{float(x):.2f}%"
     except Exception:
         s = str(x)
-        return s if s.endswith("%") else f"{s}%"
+        return s if s.endswith("%") else (f"{s}%" if s not in ("", "None") else "N/D")
 
-def _card_macro(title: str, stats: dict):
-    if not isinstance(stats, dict):
-        st.write("—")
-        return
-    win = _pct_str(stats.get("Win %", stats.get("Win%", stats.get("Win", ""))))
+def _safe_num(x):
+    try:
+        return f"{float(x):.2f}"
+    except Exception:
+        return "N/D"
+
+def _card_macro(title: str, stats: dict, light=True):
+    # stampa card leggibile anche quando stats è vuoto
+    if not isinstance(stats, dict): stats = {}
+    win  = _pct_str(stats.get("Win %", stats.get("Win%", stats.get("Win", ""))))
     draw = _pct_str(stats.get("Draw %", stats.get("Draw%", stats.get("Draw", ""))))
     loss = _pct_str(stats.get("Loss %", stats.get("Loss%", stats.get("Loss", ""))))
-    avg_for = stats.get("Avg Goals Scored", stats.get("GF avg", stats.get("GF", "-")))
-    avg_ag  = stats.get("Avg Goals Conceded", stats.get("GA avg", stats.get("GA", "-")))
+    avg_for = _safe_num(stats.get("Avg Goals Scored", stats.get("GF avg", stats.get("GF", ""))))
+    avg_ag  = _safe_num(stats.get("Avg Goals Conceded", stats.get("GA avg", stats.get("GA", ""))))
     btts    = _pct_str(stats.get("BTTS %", stats.get("BTTS%", stats.get("BTTS", ""))))
-    mp      = stats.get("Matches Played", stats.get("Matches", "-"))
+    mp      = stats.get("Matches Played", stats.get("Matches", "N/D"))
+
+    cls = "card light" if light else "card"
     st.markdown(f"""
-    <div class="card">
+    <div class="{cls}">
       <h4>{title}</h4>
       <div class="grid">
         <div class="kv"><span>Matches</span><b>{mp}</b></div>
@@ -335,17 +351,25 @@ def _card_macro(title: str, stats: dict):
     """, unsafe_allow_html=True)
 
 def _pills_from_patterns(pattern_obj):
-    # pattern_obj può essere lista o dict. Creiamo etichette leggibili.
+    # pattern_obj può essere lista/dict/qualsiasi. Creiamo etichette leggibili e colore per intensità.
     pills = []
     try:
         if isinstance(pattern_obj, dict):
-            items = sorted(pattern_obj.items(), key=lambda kv: str(kv[0]))
-            for k,v in items:
+            for k, v in pattern_obj.items():
                 label = f"{k}: {v}"
-                pills.append(label)
+                cls = "pill"
+                try:
+                    score = float(v)
+                    if score >= 0.15: cls = "pill good"
+                    elif score >= 0.05: cls = "pill warn"
+                except Exception:
+                    pass
+                pills.append((label, cls))
         elif isinstance(pattern_obj, list):
             for it in pattern_obj:
-                pills.append(str(it))
+                pills.append((str(it), "pill"))
+        else:
+            pills.append((str(pattern_obj), "pill"))
     except Exception:
         pass
     return pills
@@ -365,6 +389,7 @@ def run_live_minute_analysis(df: pd.DataFrame):
         ["🎛️ Setup", "🧠 EV Advisor", "🏆 Campionato (stesso stato)", "📈 Squadra focus", "🧩 Segnali"]
     )
 
+    # ---------- SETUP ----------
     with tab_setup:
         champ_options = sorted(df["country"].dropna().astype(str).unique())
         champ_default = st.session_state.get("campionato_corrente", champ_options[0] if champ_options else "N/A")
@@ -413,8 +438,7 @@ def run_live_minute_analysis(df: pd.DataFrame):
 
         parsed = safe_parse_score(live_score_txt)
         if not parsed:
-            st.error("Formato risultato non valido (esempio: 1-1).")
-            return
+            st.error("Formato risultato non valido (esempio: 1-1)."); return
         live_h, live_a = parsed
 
         label_live = label_match({"Odd home": odd_home, "Odd Away": odd_away})
@@ -434,11 +458,9 @@ def run_live_minute_analysis(df: pd.DataFrame):
             with oc4: q_over35 = st.number_input("Over 3.5", 1.01, 50.0, 3.75, step=0.01)
             with oc5: q_btts   = st.number_input("BTTS (GG)", 1.01, 50.0, 2.10, step=0.01)
 
-        # Write-back verso Pre-Match
         for k,v in [("ov05",q_over05),("ov15",q_over15),("ov25",q_over25),("ov35",q_over35),("btts",q_btts)]:
             _set_shared_quote(k, v)
 
-        # Persist per uso cross-tab
         st.session_state["_live_ctx"] = {
             "champ": champ, "home": home_team, "away": away_team,
             "odd_home": odd_home, "odd_draw": odd_draw, "odd_away": odd_away,
@@ -449,11 +471,8 @@ def run_live_minute_analysis(df: pd.DataFrame):
             "show_ext": show_ext
         }
 
-    # =======================
-    # PRE-CALCOLI COMUNI
-    # =======================
-    if "_live_ctx" not in st.session_state:
-        st.stop()
+    # ---------- PRECALCOLI COMUNI ----------
+    if "_live_ctx" not in st.session_state: st.stop()
     ctx = st.session_state["_live_ctx"]
     champ, home_team, away_team = ctx["champ"], ctx["home"], ctx["away"]
     odd_home, odd_draw, odd_away = ctx["odd_home"], ctx["odd_draw"], ctx["odd_away"]
@@ -474,7 +493,7 @@ def run_live_minute_analysis(df: pd.DataFrame):
 
     st.caption(f"✅ Campione: {len(df_matched)} | {sample_badge(len(df_matched))} • Team focus: {home_team} / {away_team}")
 
-    # Probabilità 1X2 (blend campionato + subset squadra)
+    # Probabilità 1X2 (blend)
     pH_L,pD_L,pA_L = _result_probs(df_matched)
     pH_H, pD_H, _   = _result_probs(df_home_side)
     _,    pD_A, pA_A= _result_probs(df_away_side)
@@ -485,7 +504,7 @@ def run_live_minute_analysis(df: pd.DataFrame):
     s = p_home + p_draw + p_away
     if s>0: p_home, p_draw, p_away = p_home/s, p_draw/s, p_away/s
 
-    # Over/BTTS (blend)
+    # Over/BTTS
     over_lines = [0.5, 1.5, 2.5, 3.5]
     probs_over = {}
     for line in over_lines:
@@ -498,12 +517,9 @@ def run_live_minute_analysis(df: pd.DataFrame):
     p_btts_side = _blend(_btts_prob(df_home_side), len(df_home_side), _btts_prob(df_away_side), len(df_away_side))
     p_btts = _blend(p_btts_L, len(df_matched), p_btts_side, len(df_home_side)+len(df_away_side))
 
-    # Priors lega/label
     priors = league_priors(df_league, live_h, live_a, over_lines)
 
-    # =======================
-    # EV ADVISOR (AI)
-    # =======================
+    # ---------- EV ADVISOR ----------
     def _ev_rows():
         rows = []
         def add_row(market, kind, price, p, prior_p):
@@ -525,22 +541,20 @@ def run_live_minute_analysis(df: pd.DataFrame):
                 "Campione": quality, "Δ vs prior": round((p-prior_p)*100,1),
                 "AI score": round(ai_score,1)
             })
-        # 1X2 Back/Lay
+        # 1X2
         add_row("1 (Home)", "Back", odd_home, p_home, priors["1"])
         add_row("X (Draw)", "Back", odd_draw, p_draw, priors["X"])
         add_row("2 (Away)", "Back", odd_away, p_away, priors["2"])
         add_row("1 (Home)", "Lay",  lay_home, p_home, priors["1"])
         add_row("X (Draw)", "Lay",  lay_draw, p_draw, priors["X"])
         add_row("2 (Away)", "Lay",  lay_away, p_away, priors["2"])
-        # Over
+        # Over/BTTS
         for line, q in {0.5:q_over05, 1.5:q_over15, 2.5:q_over25, 3.5:q_over35}.items():
             add_row(f"Over {line}", "Back", q, probs_over[line], priors[f"Over {line}"])
             add_row(f"Over {line}", "Lay",  q, probs_over[line], priors[f"Over {line}"])
-        # BTTS
         add_row("BTTS (GG)", "Back", q_btts, p_btts, priors["BTTS"])
         add_row("BTTS (GG)", "Lay",  q_btts, p_btts, priors["BTTS"])
         return pd.DataFrame(rows)
-
     df_ev_full = _ev_rows()
 
     with tab_ev:
@@ -554,68 +568,20 @@ def run_live_minute_analysis(df: pd.DataFrame):
             min_samp = st.number_input("Min campione", 0, 500, 30, step=10)
         with cflt4:
             order = st.selectbox("Ordina per", ["EV", "AI score", "Edge", "½-Kelly %"], index=0)
-
         view = df_ev_full.copy()
         if only_pos: view = view[view["EV"] > 0]
         view = view[view["EV %"] >= thr]
         view = view[view["Campione"] >= min_samp]
         view = view.sort_values(order, ascending=False).reset_index(drop=True)
+        st.dataframe(_style_table(view[["Mercato","Tipo","Quota","Prob %","Fair","Edge","EV","EV %","½-Kelly %","Campione","Δ vs prior","AI score"]]),
+                     use_container_width=True, height=420)
+        st.download_button("⬇️ Esporta ranking EV (CSV)", data=view.to_csv(index=False).encode("utf-8"),
+                           file_name="ev_advisor_snapshot.csv", mime="text/csv")
 
-        st.dataframe(
-            _style_table(view[["Mercato","Tipo","Quota","Prob %","Fair","Edge","EV","EV %","½-Kelly %","Campione","Δ vs prior","AI score"]]),
-            use_container_width=True, height=420
-        )
-
-        # ⬇️ CSV snapshot
-        st.download_button(
-            "⬇️ Esporta ranking EV (CSV)",
-            data=view.to_csv(index=False).encode("utf-8"),
-            file_name="ev_advisor_snapshot.csv",
-            mime="text/csv"
-        )
-
-        # Hedging rapido per top Back
-        top_back = view[(view["Tipo"]=="Back") & (view["EV"]>0)].head(3).to_dict(orient="records")
-        if top_back:
-            with st.expander("🛡️ Hedging rapido (green-up su quota target)"):
-                st.caption("Back a quota **ob** con stake **B** → Lay a quota **ol** con **L = (B·ob)/ol** (profitto uguale su esiti).")
-                for i, r in enumerate(top_back, start=1):
-                    st.markdown(f"**#{i} {r['Mercato']}** — Back {r['Quota']:.2f} | p≈{r['Prob %']:.0f}% | EV {r['EV %']:.1f}%")
-                    cA, cB, cC = st.columns([1,1,1])
-                    with cA:
-                        stake_B = st.number_input(f"Stake Back (#{i})", 1.0, 10000.0, 100.0, step=10.0, key=f"hedge_B_{i}")
-                    with cB:
-                        target_ol = st.number_input(f"Target Lay (#{i})", 1.01, 50.0, max(1.01, round(float(r['Quota'])*0.85,2)), step=0.01, key=f"hedge_ol_{i}")
-                    with cC:
-                        L = (stake_B * float(r["Quota"])) / float(target_ol)
-                        profit = L - stake_B
-                        st.write(f"**Lay stake** ≈ {L:.2f}")
-                        st.write(f"**Profit atteso** ≈ {profit:.2f}")
-
-        # Pills top idea
-        top = view.head(3).to_dict(orient="records")
-        if top:
-            pills = []
-            for r in top:
-                pill = badge_ev(r["EV"])
-                kelly_txt = f" • ½-Kelly≈{r['½-Kelly %']:.1f}%" if r["½-Kelly %"] is not None else ""
-                pills.append(f"<span class='ev-pill'><b>{r['Mercato']} {r['Tipo']}</b> {pill} — q={r['Quota']:.2f}{kelly_txt}</span>")
-            st.markdown(" ".join(pills), unsafe_allow_html=True)
-
-        colK1,colK2,colK3,colK4 = st.columns(4)
-        colK1.metric("Sample Campionato", len(df_matched), help=sample_badge(len(df_matched)))
-        colK2.metric("Sample Home", len(df_home_side), help=sample_badge(len(df_home_side)))
-        colK3.metric("Sample Away", len(df_away_side), help=sample_badge(len(df_away_side)))
-        colK4.metric("P(Over 0.5)→FT", f"{probs_over[0.5]*100:.1f}%")
-
-    # =======================
-    # CAMPIONATO: TABS PRO
-    # =======================
+    # ---------- CAMPIONATO ----------
     with tab_camp:
         st.subheader("🏆 Campionato — stesso label & stato live")
         t1, t2, t3, t4 = st.tabs(["Esiti 1X2", "Over / EV", "Post-minuto", "CS / Hedge"])
-
-        # --- Esiti 1X2
         with t1:
             if len(df_matched):
                 d = pd.DataFrame([
@@ -635,8 +601,6 @@ def run_live_minute_analysis(df: pd.DataFrame):
                 st.dataframe(_style_table(d), use_container_width=True)
             else:
                 st.info("Nessun match nel campione.")
-
-        # --- Over / EV
         with t2:
             if len(df_matched):
                 rows=[]
@@ -648,61 +612,29 @@ def run_live_minute_analysis(df: pd.DataFrame):
                 rows.append({"Mercato":"BTTS (GG)","Prob %":p_btts*100,"Fair":1/max(p_btts,1e-9),"Quota":q_btts,
                              "EV Back":ev_back(p_btts,q_btts,commission),"EV Lay":ev_lay(p_btts,q_btts,commission),
                              "½-Kelly %":kelly_fraction(p_btts,q_btts)*50*100})
-                df_over = pd.DataFrame(rows)
-                st.dataframe(_style_table(df_over), use_container_width=True)
+                st.dataframe(_style_table(pd.DataFrame(rows)), use_container_width=True)
             else:
                 st.info("Nessun match nel campione.")
-
-        # --- Post-minuto
         with t3:
             if len(df_matched):
                 st.dataframe(compute_post_minute_stats(df_matched, current_min), use_container_width=True)
             else:
                 st.info("Nessun match per analisi post-minuto.")
-
-        # --- CS / Hedge
         with t4:
             if len(df_matched):
                 lam_for, lam_against = estimate_remaining_lambdas(df_matched, current_min, True)
                 top_cs = final_cs_distribution(lam_for, lam_against, live_h, live_a, max_goals_delta=6)[:6]
                 st.write("**Top Correct Score (probabilità)**")
                 st.table(pd.DataFrame([{"CS": k, "Prob %": v*100} for k, v in top_cs]).style.format({"Prob %":"{:.2f}"}))
-
-                st.markdown("**Coperture CS (manuale quote)**")
-                c1,c2,c3 = st.columns(3)
-                with c1:
-                    cs1 = st.text_input("CS #1", value=top_cs[0][0] if top_cs else "1-1")
-                    q_cs1 = st.number_input("Quota CS #1", 1.01, 200.0, 6.0, step=0.01)
-                with c2:
-                    cs2 = st.text_input("CS #2", value=top_cs[1][0] if len(top_cs)>1 else "2-1")
-                    q_cs2 = st.number_input("Quota CS #2", 1.01, 200.0, 9.0, step=0.01)
-                with c3:
-                    cs3 = st.text_input("CS #3", value=top_cs[2][0] if len(top_cs)>2 else "1-2")
-                    q_cs3 = st.number_input("Quota CS #3", 1.01, 200.0, 10.0, step=0.01)
-
-                def prob_from_list(target, pairs):
-                    for k, v in pairs:
-                        if k == target: return v
-                    return 0.0
-
-                rows_cs=[]
-                for cs, q in [(cs1,q_cs1),(cs2,q_cs2),(cs3,q_cs3)]:
-                    p = prob_from_list(cs, top_cs)
-                    rows_cs.append({"CS":cs, "Prob %":p*100, "Quota":q, "EV Back":ev_back(p,q,commission)})
-                st.dataframe(_style_table(pd.DataFrame(rows_cs)), use_container_width=True)
             else:
                 st.info("Nessun match per stimare CS.")
 
-    # =======================
-    # SQUADRA: TABS PRO
-    # =======================
+    # ---------- SQUADRA ----------
     with tab_team:
         st.subheader(f"📈 Squadra — {home_team} (Home) / {away_team} (Away)")
         t1, t2, t3, t4 = st.tabs(["Esiti 1X2", "Over / EV", "Post-minuto", "CS / Hedge"])
-
         df_team_focus = df_home_side if p_home >= p_away else df_away_side
         team_name = home_team if p_home >= p_away else away_team
-
         with t1:
             if len(df_team_focus):
                 if team_name == home_team:
@@ -729,7 +661,6 @@ def run_live_minute_analysis(df: pd.DataFrame):
                 st.caption(f"Campione squadra: {len(df_team_focus)} ({sample_badge(len(df_team_focus))})")
             else:
                 st.info("Nessun match squadra con questo stato.")
-
         with t2:
             if len(df_team_focus):
                 rows=[]
@@ -747,13 +678,11 @@ def run_live_minute_analysis(df: pd.DataFrame):
                 st.dataframe(_style_table(pd.DataFrame(rows)), use_container_width=True)
             else:
                 st.info("Nessun match squadra per Over/EV.")
-
         with t3:
             if len(df_team_focus):
                 st.dataframe(compute_post_minute_stats(df_team_focus, current_min), use_container_width=True)
             else:
                 st.info("Nessun match squadra per post-minuto.")
-
         with t4:
             if len(df_team_focus):
                 lam_for_T, lam_against_T = estimate_remaining_lambdas(df_team_focus, current_min, team_name==home_team)
@@ -763,45 +692,53 @@ def run_live_minute_analysis(df: pd.DataFrame):
             else:
                 st.info("Nessun match squadra per stimare CS.")
 
-    # =======================
-    # SEGNALI ESTERNI (UI)
-    # =======================
+    # ---------- SEGNALI (alto contrasto + spiegazione) ----------
     with tab_signals:
         st.subheader("🧩 Segnali esterni (pattern, macro KPI, bias lega)")
+        st.info(
+            "Questa sezione **contesta** l'EV con 3 fonti esterne:\n"
+            "1) **Macro KPI** di squadra (Win/Draw/Loss%, GF/GA medie, BTTS%),\n"
+            "2) **Pattern Live** da `pattern_analysis` (pillole colorate per intensità,\n"
+            "   verde = forte, giallo = moderato),\n"
+            "3) **Bias di lega** da `macros`.\n"
+            "Usala per validare EV+ e scartare opportunità con campione debole o bias contrari."
+        )
         if show_ext:
+            high_contrast = st.toggle("🌓 Contrasto alto (card chiare)", value=True)
+            show_raw = st.toggle("Mostra JSON grezzo", value=False)
+
             ext = get_external_signals(df_league, home_team, away_team)
             has_any = ext.get("macro_home") or ext.get("macro_away") or ext.get("pattern_signals") or ext.get("macros_bias")
+
             if has_any:
                 # Macro KPI cards
-                if ext.get("macro_home") or ext.get("macro_away"):
-                    st.markdown("**Macro KPI (estratto)**")
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        _card_macro(f"Home — {home_team}", ext.get("macro_home", {}))
-                    with c2:
-                        _card_macro(f"Away — {away_team}", ext.get("macro_away", {}))
+                st.markdown("**Macro KPI (estratto)**")
+                c1, c2 = st.columns(2)
+                with c1: _card_macro(f"Home — {home_team}", ext.get("macro_home", {}), light=high_contrast)
+                with c2: _card_macro(f"Away — {away_team}", ext.get("macro_away", {}), light=high_contrast)
 
                 # Pattern → pills
                 if ext.get("pattern_signals"):
                     st.markdown("**Pattern live**")
                     pills = _pills_from_patterns(ext["pattern_signals"])
                     if pills:
-                        st.markdown(
-                            "<div class='pills'>" + " ".join([f"<span class='pill good'>{p}</span>" for p in pills]) + "</div>",
-                            unsafe_allow_html=True
-                        )
+                        html = "<div class='pills'>" + " ".join([f"<span class='{cls}'>{txt}</span>" for txt,cls in pills]) + "</div>"
+                        st.markdown(html, unsafe_allow_html=True)
                     else:
                         st.caption("Nessun pattern forte rilevato.")
 
-                # Bias lega (macros)
+                # Bias lega
                 if ext.get("macros_bias"):
                     st.markdown("**Bias lega (macros)**")
                     bias = ext["macros_bias"]
                     try:
-                        df_bias = pd.DataFrame([bias])
-                        st.dataframe(df_bias, use_container_width=True)
+                        st.dataframe(pd.DataFrame([bias]), use_container_width=True)
                     except Exception:
                         st.json(bias)
+
+                if show_raw:
+                    st.caption("Dati grezzi")
+                    st.json(ext)
 
                 if ext.get("notes"):
                     st.caption(" • ".join(ext["notes"]))
