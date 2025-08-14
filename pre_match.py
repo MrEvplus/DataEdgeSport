@@ -1,3 +1,4 @@
+# pre_match.py — versione completa con ottimizzazioni e filtri Campionato/Stagioni dal solo HUB
 from __future__ import annotations
 
 import re
@@ -10,8 +11,15 @@ import altair as alt
 from squadre import compute_team_macro_stats, render_team_stats_tab
 from utils import label_match
 from correct_score import run_correct_score_panel  # <-- già presente
-# >>> NEW: Live module import
+# >>> Live module import
 from analisi_live_minuto import run_live_minute_analysis  # modulo Live integrato
+
+# ==========================
+# Config: usa SEMPRE filtri globali dall'Hub (niente selettori locali)
+# ==========================
+USE_GLOBAL_FILTERS = True
+GLOBAL_CHAMP_KEY   = "global_country"
+GLOBAL_SEASONS_KEY = "global_seasons"   # lista di stagioni scelte nell’Hub
 
 # ==========================
 # Altair Theme (globale)
@@ -31,7 +39,6 @@ try:
     alt.themes.enable("app_theme")
 except Exception:
     pass
-
 
 # ==========================
 # Helper generali
@@ -151,7 +158,6 @@ def _pick_current_season(seasons_desc: list[str]) -> list[str]:
     # fallback 2: la prima più recente
     return seasons_desc[:1]
 
-
 # ==========================
 # Quote condivise (sincronizzate tra tab)
 # ==========================
@@ -193,12 +199,12 @@ def _get_shared_quotes() -> dict:
         "btts": float(st.session_state[_shared_key("btts")]),
     }
 
-
 # ==========================
-# League data by Label (robusta)
+# League data by Label (robusta) + cache
 # ==========================
-def _league_data_by_label(df: pd.DataFrame, label: str) -> dict | None:
-    df = df.copy()
+@st.cache_data(show_spinner=False, ttl=900)
+def _league_data_by_label_cached(df_light: pd.DataFrame, label: str | None) -> dict | None:
+    df = df_light.copy()
     if "Label" not in df.columns:
         df["Label"] = df.apply(label_match, axis=1)
 
@@ -213,12 +219,14 @@ def _league_data_by_label(df: pd.DataFrame, label: str) -> dict | None:
         AwayWin_pct=("__res__", lambda x: (x == "Away Win").mean() * 100),
     ).reset_index()
 
-    row = group[group["Label"] == label]
+    if label:
+        row = group[group["Label"] == label]
+    else:
+        row = group  # None -> ritorna comunque i valori (usato come fallback)
     return row.iloc[0].to_dict() if not row.empty else None
 
-
 # ==========================
-# Back/Lay 1x2 (robusto)
+# Back/Lay 1x2 (robusto) + cache
 # ==========================
 def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
     if df.empty:
@@ -272,9 +280,12 @@ def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
     rois_lay  = {k: round((v / denom) * 100, 2) for k, v in profits_lay.items()}
     return profits_back, rois_back, profits_lay, rois_lay, denom
 
+@st.cache_data(show_spinner=False, ttl=900)
+def _calc_back_lay_1x2_cached(df_light: pd.DataFrame, commission: float = 0.0):
+    return _calc_back_lay_1x2(df_light.copy(), commission)
 
 # ==========================
-# ROI Over/Under/BTTS
+# ROI Over/Under/BTTS + cache
 # ==========================
 def _calc_market_roi(df: pd.DataFrame, market: str, price_cols: list[str],
                      line: float | None, commission: float, manual_price: float | None = None):
@@ -335,6 +346,11 @@ def _calc_market_roi(df: pd.DataFrame, market: str, price_cols: list[str],
         "Match Analizzati": total
     }
 
+@st.cache_data(show_spinner=False, ttl=900)
+def _calc_market_roi_cached(df_light: pd.DataFrame, market: str, price_cols: tuple[str, ...],
+                            line: float | None, commission: float, manual_price: float | None):
+    # df_light è già ridotto alle colonne utili
+    return _calc_market_roi(df_light.copy(), market, list(price_cols), line, commission, manual_price)
 
 # ==========================
 # Probabilità storiche per EV
@@ -358,9 +374,8 @@ def _quality_label(n: int) -> str:
         return "MEDIO"
     return "BASSO"
 
-
 # ==========================
-# EV storico – tabella + Best EV
+# EV storico – tabella + Best EV + cache
 # ==========================
 def _build_ev_table(df_home_ctx: pd.DataFrame, df_away_ctx: pd.DataFrame, df_h2h: pd.DataFrame,
                     squadra_casa: str, squadra_ospite: str,
@@ -421,6 +436,12 @@ def _build_ev_table(df_home_ctx: pd.DataFrame, df_away_ctx: pd.DataFrame, df_h2h
             break
     return df_ev, best
 
+@st.cache_data(show_spinner=False, ttl=900)
+def _build_ev_table_cached(home_ctx_light: pd.DataFrame, away_ctx_light: pd.DataFrame, h2h_light: pd.DataFrame,
+                           squadra_casa: str, squadra_ospite: str,
+                           quota_ov15: float, quota_ov25: float, quota_ov35: float, quota_btts: float):
+    return _build_ev_table(home_ctx_light.copy(), away_ctx_light.copy(), h2h_light.copy(),
+                           squadra_casa, squadra_ospite, quota_ov15, quota_ov25, quota_ov35, quota_btts)
 
 # ==========================
 # ENTRY POINT (PRE-MATCH)
@@ -431,69 +452,82 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     qin = _get_qparams()
     _init_shared_quotes()  # prepara le quote condivise
 
-    # Normalizzazione e filtro league
+    # Normalizzazione + CONTEX
     if "country" not in df.columns:
         st.error("Dataset senza colonna 'country'.")
         st.stop()
 
     df = df.copy()
     df["country"] = _ensure_str(df["country"]).str.strip().str.upper()
-    league = (db_selected or "").strip().upper()
-    df = df[df["country"] == league]
-    if df.empty:
-        st.warning(f"Nessun dato per il campionato '{league}'.")
-        st.stop()
 
-    # Snapshot del campionato PRIMA del filtro stagioni (serve alla tab Statistiche squadre)
-    df_league_all = df.copy()
+    # === Campionato & Stagioni: SOLO dall’Hub ===
+    if USE_GLOBAL_FILTERS:
+        league = (st.session_state.get(GLOBAL_CHAMP_KEY) or db_selected or "").strip().upper()
+        seasons_from_hub = st.session_state.get(GLOBAL_SEASONS_KEY)
+        df = df[df["country"] == league] if league else df
+        if seasons_from_hub and "Stagione" in df.columns:
+            df = df[df["Stagione"].astype(str).isin([str(s) for s in seasons_from_hub])]
+        # Badge informativo
+        txt_seas = ", ".join([str(s) for s in seasons_from_hub]) if seasons_from_hub else "tutte"
+        st.caption(f"Contesto: **{league}** • **Stagioni**: {txt_seas}")
+        # Snapshot PRIMA di eventuali sotto-filtri interni (per tab Stats/CS/Live)
+        df_league_all = df.copy()
+        seasons_selected = seasons_from_hub or None
+    else:
+        # ---- Modalità legacy (se mai servisse): lascia i selettori locali ----
+        league = (db_selected or "").strip().upper()
+        df = df[df["country"] == league]
+        if df.empty:
+            st.warning(f"Nessun dato per il campionato '{league}'.")
+            st.stop()
 
+        df_league_all = df.copy()
+        # ======== Filtro Stagioni (locale) ========
+        seasons_selected = None
+        if "Stagione" in df.columns:
+            seasons_desc = _seasons_desc(df["Stagione"].dropna().unique().tolist())
+            latest = seasons_desc[0] if seasons_desc else None
+
+            with st.expander("⚙️ Filtro Stagioni", expanded=True):
+                st.markdown(
+                    "Seleziona la profondità storica da analizzare. "
+                    "**Intervallo rapido** parte dalla **stagione più recente** verso il passato."
+                )
+                colA, colB = st.columns([2, 1])
+                with colA:
+                    seasons_selected = st.multiselect(
+                        "Seleziona stagioni (Manuale)",
+                        options=seasons_desc,
+                        default=[latest] if latest else [],
+                        key=_k("stagioni_manual"),
+                    )
+                with colB:
+                    preset = st.selectbox(
+                        "Intervallo rapido",
+                        options=["Tutte", "Stagione in corso", "Ultime 10", "Ultime 5", "Ultime 3", "Ultime 2", "Ultime 1"],
+                        index=0,
+                        key=_k("stagioni_preset"),
+                    )
+                    if preset == "Stagione in corso":
+                        seasons_selected = _pick_current_season(seasons_desc)
+                    elif preset != "Tutte" and seasons_desc:
+                        try:
+                            n = int(preset.split()[-1])
+                        except Exception:
+                            n = 1
+                        seasons_selected = seasons_desc[:n]
+                if seasons_selected:
+                    st.caption(f"Stagioni attive: **{', '.join(seasons_selected)}**")
+                    df = df[df["Stagione"].astype(str).isin(seasons_selected)]
+                else:
+                    st.caption("Filtro stagioni: **Tutte**")
+                    seasons_selected = None
+
+    # Colonne base
     df["Home"] = _ensure_str(df["Home"]).str.strip()
     df["Away"] = _ensure_str(df["Away"]).str.strip()
     if "Label" not in df.columns:
         df["Label"] = df.apply(label_match, axis=1)
-
-    # ======== Filtro Stagioni (globale) ========
-    seasons_selected = None  # <-- inizializziamo sempre
-    if "Stagione" in df.columns:
-        seasons_desc = _seasons_desc(df["Stagione"].dropna().unique().tolist())
-        latest = seasons_desc[0] if seasons_desc else None
-
-        with st.expander("⚙️ Filtro Stagioni", expanded=True):
-            st.markdown(
-                "Seleziona la profondità storica da analizzare. "
-                "**Intervallo rapido** parte dalla **stagione più recente** verso il passato."
-            )
-            colA, colB = st.columns([2, 1])
-            with colA:
-                seasons_selected = st.multiselect(
-                    "Seleziona stagioni (Manuale)",
-                    options=seasons_desc,
-                    default=[latest] if latest else [],
-                    key=_k("stagioni_manual"),
-                )
-            with colB:
-                preset = st.selectbox(
-                    "Intervallo rapido",
-                    options=["Tutte", "Stagione in corso", "Ultime 10", "Ultime 5", "Ultime 3", "Ultime 2", "Ultime 1"],
-                    index=0,
-                    key=_k("stagioni_preset"),
-                )
-                if preset == "Stagione in corso":
-                    seasons_selected = _pick_current_season(seasons_desc)
-                elif preset != "Tutte" and seasons_desc:
-                    try:
-                        n = int(preset.split()[-1])
-                    except Exception:
-                        n = 1
-                    seasons_selected = seasons_desc[:n]
-                # else: mantieni la selezione manuale
-
-            if seasons_selected:
-                st.caption(f"Stagioni attive: **{', '.join(seasons_selected)}**")
-                df = df[df["Stagione"].astype(str).isin(seasons_selected)]
-            else:
-                st.caption("Filtro stagioni: **Tutte**")
-                seasons_selected = None  # esplicito
 
     # ======== Ricerca rapida + assegnazione ruolo ========
     all_teams = sorted(set(df["Home"].dropna().unique()) | set(df["Away"].dropna().unique()))
@@ -609,7 +643,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.info("⚠️ Nessuna partita trovata per questo label nel campionato: uso l'intero campionato.")
         label = None
 
-    # ======== Tabs (aggiunta la sesta per Live) ========
+    # ======== Tabs (compresi Live e Correct Score) ========
     tab_1x2, tab_roi, tab_ev, tab_stats, tab_cs, tab_live = st.tabs(
         ["1X2", "ROI mercati", "EV storico squadre", "Statistiche squadre", "Correct Score", "Live da Minuto"]
     )
@@ -625,8 +659,15 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         )
 
         df_league_scope = df[df["Label"] == label] if label else df
-        profits_back, rois_back, profits_lay, rois_lay, matches_league = _calc_back_lay_1x2(df_league_scope)
-        league_stats = _league_data_by_label(df, label) if label else _league_data_by_label(df, _label_from_odds(2.0, 2.0))
+
+        # ➜ riduci colonne per cache/hash più leggeri
+        cols_1x2 = ["Home","Away","Home Goal FT","Away Goal FT","Odd home","Odd Draw","Odd Away","Label"]
+        df_league_light = df_league_scope[cols_1x2].copy()
+        profits_back, rois_back, profits_lay, rois_lay, matches_league = _calc_back_lay_1x2_cached(df_league_light)
+
+        league_stats = _league_data_by_label_cached(
+            df[["Home","Away","Home Goal FT","Away Goal FT","Label"]].copy(), label
+        )
 
         row_league = {
             "LABEL": "League (Label)" if label else "League (All)",
@@ -651,8 +692,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 st.info(f"⚠️ Nessuna partita per questo label. Uso tutte le partite di {squadra_casa}.")
         else:
             df_home = df[df["Home"] == squadra_casa]
+        df_home_light = df_home[cols_1x2].copy()
 
-        profits_back, rois_back, profits_lay, rois_lay, matches_home = _calc_back_lay_1x2(df_home)
+        profits_back, rois_back, profits_lay, rois_lay, matches_home = _calc_back_lay_1x2_cached(df_home_light)
         row_home = {"LABEL": squadra_casa, "MATCHES": matches_home}
         if matches_home > 0:
             wins = int((pd.to_numeric(df_home["Home Goal FT"], errors="coerce") > pd.to_numeric(df_home["Away Goal FT"], errors="coerce")).sum())
@@ -678,8 +720,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 st.info(f"⚠️ Nessuna partita per questo label. Uso tutte le partite di {squadra_ospite}.")
         else:
             df_away = df[df["Away"] == squadra_ospite]
+        df_away_light = df_away[cols_1x2].copy()
 
-        profits_back, rois_back, profits_lay, rois_lay, matches_away = _calc_back_lay_1x2(df_away)
+        profits_back, rois_back, profits_lay, rois_lay, matches_away = _calc_back_lay_1x2_cached(df_away_light)
         row_away = {"LABEL": squadra_ospite, "MATCHES": matches_away}
         if matches_away > 0:
             wins = int((pd.to_numeric(df_away["Away Goal FT"], errors="coerce") > pd.to_numeric(df_away["Home Goal FT"], errors="coerce")).sum())
@@ -726,8 +769,15 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.divider()
         st.subheader("📌 Macro KPI Squadre")
         st.markdown("Media goal fatti/subiti, esito 1X2 e BTTS% della squadra nel contesto **Home@Casa / Away@Trasferta**.")
-        stats_home = compute_team_macro_stats(df, squadra_casa, "Home")
-        stats_away = compute_team_macro_stats(df, squadra_ospite, "Away")
+
+        @st.cache_data(show_spinner=False, ttl=900)
+        def _macro_stats_cached(df_light: pd.DataFrame, team: str, side: str):
+            # wrapper per caching del modulo esterno
+            return compute_team_macro_stats(df_light.copy(), team, side)
+
+        df_stats_light = df[["Home","Away","Home Goal FT","Away Goal FT"]].copy()
+        stats_home = _macro_stats_cached(df_stats_light, squadra_casa, "Home")
+        stats_away = _macro_stats_cached(df_stats_light, squadra_ospite, "Away")
         if not stats_home or not stats_away:
             st.info("⚠️ Una delle due squadre non ha match disponibili per il confronto.")
         else:
@@ -750,31 +800,46 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         df_ev_scope = df[df["Label"] == label].copy() if label else df.copy()
         df_ev_scope = df_ev_scope.dropna(subset=["Home Goal FT", "Away Goal FT"])
 
-        OVER15_COLS = ["cotao1", "Odd Over 1.5", "odd over 1,5", "Over 1.5"]
-        OVER25_COLS = ["cotao", "Odd Over 2.5", "odd over 2,5", "Over 2.5"]
-        OVER35_COLS = ["cotao3", "Odd Over 3.5", "odd over 3,5", "Over 3.5"]
-        BTTS_YES_COLS = ["gg", "GG", "odd goal", "BTTS Yes", "Odd BTTS Yes"]
+        OVER15_COLS = ("cotao1", "Odd Over 1.5", "odd over 1,5", "Over 1.5")
+        OVER25_COLS = ("cotao",  "Odd Over 2.5", "odd over 2,5", "Over 2.5")
+        OVER35_COLS = ("cotao3", "Odd Over 3.5", "odd over 3,5", "Over 3.5")
+        BTTS_YES_COLS = ("gg", "GG", "odd goal", "BTTS Yes", "Odd BTTS Yes")
 
         # ➜ Usa le quote condivise inserite sopra
         shared = _get_shared_quotes()
         q_ov15, q_ov25, q_ov35, q_btts = shared["ov15"], shared["ov25"], shared["ov35"], shared["btts"]
 
-        def _roi_table_for(df_scope: pd.DataFrame, title: str) -> pd.DataFrame:
-            table_data = [
-                _calc_market_roi(df_scope, "Over 1.5", OVER15_COLS, 1.5, commission, q_ov15),
-                _calc_market_roi(df_scope, "Over 2.5", OVER25_COLS, 2.5, commission, q_ov25),
-                _calc_market_roi(df_scope, "Over 3.5", OVER35_COLS, 3.5, commission, q_ov35),
-                _calc_market_roi(df_scope, "BTTS",     BTTS_YES_COLS, None, commission, q_btts),
-            ]
-            df_out = pd.DataFrame(table_data)
-            df_out.insert(0, "Scope", title)
-            return df_out
+        # Riduci colonne per cache/hash
+        def _light(df_in: pd.DataFrame, extra_cols: tuple[str, ...]) -> pd.DataFrame:
+            base = ["Home Goal FT","Away Goal FT"]
+            cols = list({*base, *extra_cols})
+            return df_in[[c for c in cols if c in df_in.columns]].copy()
 
-        df_roi_league = _roi_table_for(df_ev_scope, "Campionato/Label")
+        df_roi_league = pd.DataFrame([
+            _calc_market_roi_cached(_light(df_ev_scope, OVER15_COLS), "Over 1.5", OVER15_COLS, 1.5, commission, q_ov15),
+            _calc_market_roi_cached(_light(df_ev_scope, OVER25_COLS), "Over 2.5", OVER25_COLS, 2.5, commission, q_ov25),
+            _calc_market_roi_cached(_light(df_ev_scope, OVER35_COLS), "Over 3.5", OVER35_COLS, 3.5, commission, q_ov35),
+            _calc_market_roi_cached(_light(df_ev_scope, BTTS_YES_COLS), "BTTS",     BTTS_YES_COLS, None, commission, q_btts),
+        ])
+        df_roi_league.insert(0, "Scope", "Campionato/Label")
+
         df_home_ctx = df[(df["Home"] == squadra_casa)].dropna(subset=["Home Goal FT", "Away Goal FT"]).copy()
-        df_roi_home = _roi_table_for(df_home_ctx, f"{squadra_casa} @Casa")
+        df_roi_home = pd.DataFrame([
+            _calc_market_roi_cached(_light(df_home_ctx, OVER15_COLS), "Over 1.5", OVER15_COLS, 1.5, commission, q_ov15),
+            _calc_market_roi_cached(_light(df_home_ctx, OVER25_COLS), "Over 2.5", OVER25_COLS, 2.5, commission, q_ov25),
+            _calc_market_roi_cached(_light(df_home_ctx, OVER35_COLS), "Over 3.5", OVER35_COLS, 3.5, commission, q_ov35),
+            _calc_market_roi_cached(_light(df_home_ctx, BTTS_YES_COLS), "BTTS",     BTTS_YES_COLS, None, commission, q_btts),
+        ])
+        df_roi_home.insert(0, "Scope", f"{squadra_casa} @Casa")
+
         df_away_ctx = df[(df["Away"] == squadra_ospite)].dropna(subset=["Home Goal FT", "Away Goal FT"]).copy()
-        df_roi_away = _roi_table_for(df_away_ctx, f"{squadra_ospite} @Trasferta")
+        df_roi_away = pd.DataFrame([
+            _calc_market_roi_cached(_light(df_away_ctx, OVER15_COLS), "Over 1.5", OVER15_COLS, 1.5, commission, q_ov15),
+            _calc_market_roi_cached(_light(df_away_ctx, OVER25_COLS), "Over 2.5", OVER25_COLS, 2.5, commission, q_ov25),
+            _calc_market_roi_cached(_light(df_away_ctx, OVER35_COLS), "Over 3.5", OVER35_COLS, 3.5, commission, q_ov35),
+            _calc_market_roi_cached(_light(df_away_ctx, BTTS_YES_COLS), "BTTS",     BTTS_YES_COLS, None, commission, q_btts),
+        ])
+        df_roi_away.insert(0, "Scope", f"{squadra_ospite} @Trasferta")
 
         df_roi_all = pd.concat([df_roi_league, df_roi_home, df_roi_away], ignore_index=True)
 
@@ -833,8 +898,14 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         shared = _get_shared_quotes()
         quota_ov15, quota_ov25, quota_ov35, quota_btts = shared["ov15"], shared["ov25"], shared["ov35"], shared["btts"]
 
-        df_ev_squadre, best = _build_ev_table(
-            df_home_ctx, df_away_ctx, df_h2h,
+        # riduci per cache
+        base_cols = ["Home Goal FT","Away Goal FT"]
+        home_ctx_light = df_home_ctx[base_cols].copy()
+        away_ctx_light = df_away_ctx[base_cols].copy()
+        h2h_light       = df_h2h[base_cols].copy()
+
+        df_ev_squadre, best = _build_ev_table_cached(
+            home_ctx_light, away_ctx_light, h2h_light,
             squadra_casa, squadra_ospite,
             quota_ov15, quota_ov25, quota_ov35, quota_btts
         )
@@ -884,7 +955,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     # ==========================
     with tab_stats:
         render_team_stats_tab(
-            df_league_all,     # campionato PRIMA del filtro stagioni globale
+            df_league_all,     # campionato filtrato corrente
             league,
             squadra_casa,
             squadra_ospite,
@@ -897,7 +968,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.subheader("Correct Score – Poisson + Dixon-Coles")
         st.caption("Stima λ con shrink verso media di lega + forma recente. Heatmap, top score e EV sui punteggi corretti.")
         run_correct_score_panel(
-            df=df_league_all,           # puoi usare df filtrato per stagioni se vuoi coerenza con le altre tab
+            df=df_league_all,
             league_code=league,
             home_team=squadra_casa,
             away_team=squadra_ospite,
@@ -914,18 +985,13 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     # ==========================
     with tab_live:
         st.markdown("**Analisi Live** — precompilata con i dati selezionati sopra.")
-
-        # Prefill: campionato & squadre per il modulo Live
         st.session_state["campionato_corrente"] = league  # usato dal modulo Live
         st.session_state["home_live"] = squadra_casa
         st.session_state["away_live"] = squadra_ospite
-
-        # Prefill: quote 1x2 per il modulo Live
         st.session_state["odd_h"] = float(odd_home)
         st.session_state["odd_d"] = float(odd_draw)
         st.session_state["odd_a"] = float(odd_away)
 
-        # Opzionale: mini controlli veloci (si può usare anche solo l'interfaccia interna del modulo)
         cL1, cL2 = st.columns([1,1])
         with cL1:
             live_minute = st.slider("⏲️ Minuto (prefill)", min_value=1, max_value=120, value=45, key=_k("live:min"))
@@ -939,17 +1005,14 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         # Evita l’errore Streamlit quando un modulo figlio richiama set_page_config
         _orig_set_cfg = getattr(st, "set_page_config", None)
         try:
-            def _noop(*args, **kwargs):
-                return None
+            def _noop(*args, **kwargs): return None
             st.set_page_config = _noop  # no-op locale
-
-            # Chiamiamo il modulo Live passando l'intero campionato (snapshot prima del filtro stagioni)
             run_live_minute_analysis(df_league_all)
         except Exception as e:
             st.warning(f"Modulo Live caricato con avviso: {e}")
         finally:
             if _orig_set_cfg:
-                st.set_page_config = _orig_set_cfg  # ripristina
+                st.set_page_config = _orig_set_cfg
 
     # Aggiorna query params (opzionale)
     shared = _get_shared_quotes()
