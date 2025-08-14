@@ -1,4 +1,11 @@
-# pre_match.py — versione completa PRO, con Macro KPI Plus (tabelle pro) e integrazione con filtri HUB
+# pre_match.py — versione PRO consolidata
+# - Macro KPI Plus con tabelle professionali
+# - EV/ROI con glossari e stile
+# - Statistiche Squadre: filtro solo per la sezione (default stagione corrente)
+# - Live: passaggio contesto + badge
+# - Fix robustezza: _first_present, _calc_market_roi
+# - Calibrazione 1X2: chart Altair robusto senza transform_fold
+
 from __future__ import annotations
 
 import re
@@ -8,7 +15,7 @@ import pandas as pd
 import numpy as np
 import altair as alt
 
-# ----- Moduli esterni (robusti a nomi differenti) -----
+# ========= Moduli esterni opzionali =========
 try:
     from squadre import compute_team_macro_stats, render_team_stats_tab
 except Exception:
@@ -16,8 +23,8 @@ except Exception:
         from team_stats import compute_team_macro_stats, render_team_stats_tab  # type: ignore
     except Exception:
         compute_team_macro_stats = None  # type: ignore
-
-from utils import label_match
+        def render_team_stats_tab(*args, **kwargs):
+            st.info("Modulo 'render_team_stats_tab' non disponibile in questo ambiente.")
 
 try:
     from correct_score import run_correct_score_panel
@@ -35,18 +42,30 @@ except Exception:
     except Exception:
         _run_live = None  # type: ignore
 
+try:
+    from utils import label_match
+except Exception:
+    # fallback ultra semplice
+    def label_match(row):
+        try:
+            h = float(row.get("Odd home", 2.0))
+            a = float(row.get("Odd Away", 2.0))
+        except Exception:
+            return "Others"
+        if h < 1.9 and a > 3.2:
+            return "H_MediumFav 1.5-2"
+        if a < 1.9 and h > 3.2:
+            return "A_MediumFav 1.5-2"
+        return "Others"
 
-# ==========================
-# Config HUB
-# ==========================
+
+# ========= Config HUB =========
 USE_GLOBAL_FILTERS = True
 GLOBAL_CHAMP_KEY   = "global_country"
 GLOBAL_SEASONS_KEY = "global_seasons"   # lista stagioni (HUB)
 
 
-# ==========================
-# Altair Theme
-# ==========================
+# ========= Altair Theme =========
 def _alt_theme():
     return {
         "config": {
@@ -64,9 +83,7 @@ except Exception:
     pass
 
 
-# ==========================
-# Helper generali
-# ==========================
+# ========= Helper generali =========
 def _k(name: str) -> str:
     return f"prematch:{name}"
 
@@ -124,7 +141,6 @@ def _download_df_button(df: pd.DataFrame, filename: str, label: str):
     csv = df.to_csv(index=False).encode("utf-8")
     st.download_button(label=label, data=csv, file_name=filename, mime="text/csv", key=_k(f"dl:{filename}"))
 
-# Query params
 def _get_qparams() -> dict:
     try:
         return dict(st.query_params)
@@ -139,9 +155,7 @@ def _set_qparams(**kwargs):
         st.experimental_set_query_params(**qp)
 
 
-# ==========================
-# Stagioni helpers
-# ==========================
+# ========= Stagioni helpers =========
 def _season_sort_key(s: str) -> int:
     if not isinstance(s, str):
         s = str(s)
@@ -174,9 +188,7 @@ def _pick_current_season(seasons_desc: list[str]) -> list[str]:
     return seasons_desc[:1]
 
 
-# ==========================
-# Quote condivise (sincronizzate tra tab)
-# ==========================
+# ========= Quote condivise (sincronizzate tra tab) =========
 _SHARED_PREFIX = "prematch:shared:"
 
 def _shared_key(name: str) -> str:
@@ -208,9 +220,7 @@ def _get_shared_quotes() -> dict:
     }
 
 
-# ==========================
-# League data by Label + cache
-# ==========================
+# ========= League data by Label + cache =========
 @st.cache_data(show_spinner=False, ttl=900)
 def _league_data_by_label_cached(df_light: pd.DataFrame, label: str | None) -> dict | None:
     df = df_light.copy()
@@ -235,9 +245,7 @@ def _league_data_by_label_cached(df_light: pd.DataFrame, label: str | None) -> d
     return row.iloc[0].to_dict() if not row.empty else None
 
 
-# ==========================
-# Back/Lay 1x2 + cache
-# ==========================
+# ========= Back/Lay 1x2 + cache =========
 def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
     if df.empty:
         zero = {"HOME": 0.0, "DRAW": 0.0, "AWAY": 0.0}
@@ -295,9 +303,7 @@ def _calc_back_lay_1x2_cached(df_light: pd.DataFrame, commission: float = 0.0):
     return _calc_back_lay_1x2(df_light.copy(), commission)
 
 
-# ==========================
-# ROI Over/BTTS + cache (robusto)
-# ==========================
+# ========= ROI Over/BTTS + cache (robusto) =========
 def _calc_market_roi(df: pd.DataFrame, market: str, price_cols,
                      line: float | None, commission: float, manual_price: float | None = None):
     df = df.dropna(subset=["Home Goal FT", "Away Goal FT"])
@@ -360,9 +366,7 @@ def _calc_market_roi_cached(df_light: pd.DataFrame, market: str, price_cols: tup
     return _calc_market_roi(df_light.copy(), list(price_cols), line, commission, manual_price)
 
 
-# ==========================
-# Probabilità storiche per EV
-# ==========================
+# ========= Probabilità storiche per EV =========
 def _market_prob(df: pd.DataFrame, market: str, line: float | None) -> float:
     if df.empty:
         return 0.0
@@ -381,9 +385,7 @@ def _quality_label(n: int) -> str:
     return "BASSO"
 
 
-# ==========================
-# EV storico – tabella + Best EV
-# ==========================
+# ========= EV storico – tabella + Best EV =========
 def _build_ev_table(df_home_ctx: pd.DataFrame, df_away_ctx: pd.DataFrame, df_h2h: pd.DataFrame,
                     squadra_casa: str, squadra_ospite: str,
                     quota_ov15: float, quota_ov25: float, quota_ov35: float, quota_btts: float):
@@ -532,7 +534,7 @@ def _momentum_block(df, team, side, last_n=8):
     elo_col = "ELO Home" if side=="Home" else "ELO Away"
     form_col = "Form Home" if side=="Home" else "Form Away"
     elo_delta = None; form_delta = None
-    if elo_col in df_side.columns: 
+    if elo_col in df_side.columns:
         e0 = df_side[elo_col].mean(); e1 = df_last[elo_col].mean()
         if not (np.isnan(e0) or np.isnan(e1)): elo_delta = e1 - e0
     if form_col in df_side.columns:
@@ -633,10 +635,45 @@ def _df_style_positive_negative(df: pd.DataFrame, pos_good_cols: list[str] = Non
         if c in df.columns: sty = sty.applymap(lambda v: _col(v, "neg"), subset=[c])
     return sty.set_properties(**{"font-size":"12px"})
 
+# ========= Stili/Glossari per EV & ROI =========
+def _style_ev(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    def _col_ev(v):
+        try: f = float(v)
+        except Exception: return ""
+        if f > 0:  return "background-color:#073b1d;color:#c7ffe4;"
+        if f < 0:  return "background-color:#4c0a0a;color:#ffd9d9;"
+        return "background-color:#1f2937;color:#e5e7eb;"
+    ev_cols = [c for c in df.columns if c.lower().startswith("ev")]
+    sty = df.style
+    for c in ev_cols:
+        sty = sty.applymap(_col_ev, subset=[c])
+    return sty.set_properties(**{"font-size":"12px"})
+
+def _render_glossary_ev():
+    with st.expander("ℹ️ Glossario — EV storico", expanded=False):
+        st.markdown("""
+- **Prob %**: stima storica della probabilità dell’esito (Home@Casa, Away@Trasferta, Blended, Head-to-Head).
+- **EV = quota × p − 1**: valore atteso unitario. EV>0 = vantaggio.
+- **Qualità**: solidità del campione (H/A = somma match di contesto; H2H = scontri diretti).
+- **Best EV**: opportunità migliore tra *Blended* e *Head-to-Head* con EV>0.
+        """)
+
+def _render_glossary_roi():
+    with st.expander("ℹ️ Glossario — ROI mercati", expanded=False):
+        st.markdown("""
+- **Quota Media**: media delle quote usate (o la quota manuale se i prezzi storici non erano disponibili).
+- **Esiti %**: percentuale di volte in cui l’evento si è verificato.
+- **ROI Back/Lay %**: profitto medio per scommessa (commissione exchange applicata).
+- **Scope**:
+  - *Campionato/Label*: tutte le partite del campionato (o solo del label).
+  - *Squadra @Casa/Trasferta*: partite della squadra nel relativo contesto.
+        """)
+
+# ========= Macro KPI Plus (tabelle pro) =========
 def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
     st.markdown("### 🔬 Approfondimenti Macro KPI (complementari a 1X2)")
 
-    # 1) Momentum & Affidabilità — TABELLLE PRO
+    # 1) Momentum & Affidabilità
     st.subheader("1) 📈 Momentum & Affidabilità")
     last_n = st.slider("Ultime N gare per Momentum", 6, 12, 8, key="mom_lastn")
 
@@ -649,7 +686,6 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
             st.info(f"Nessun dato per **{title}**.")
             return
 
-        # ✅ robusto: usa le chiavi con prefisso "Δ " e fallback a 0
         dlt = block.get("delta", {}) or {}
         base = {
             "Δ Win%":  float(dlt.get("Δ Win%", 0.0)),
@@ -678,9 +714,7 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
             f"**{title}** — campione: {base['N (tot)']} • recenti: {base['N (ultime)']} • affidabilità: {base['Affidabilità']}"
         )
         st.dataframe(
-            sty,
-            use_container_width=True,
-            height=88,
+            sty, use_container_width=True, height=88,
             column_config={
                 "Δ Win%":  st.column_config.NumberColumn(format="+.1f"),
                 "Δ Draw%": st.column_config.NumberColumn(format="+.1f"),
@@ -694,14 +728,12 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
             },
         )
 
-    with c1:
-        _render_mom(mH, f"{home_team} @casa")
-    with c2:
-        _render_mom(mA, f"{away_team} @trasferta")
+    with c1: _render_mom(mH, f"{home_team} @casa")
+    with c2: _render_mom(mA, f"{away_team} @trasferta")
 
     st.divider()
 
-    # 2) ⏱️ Primo Gol → Esito (Pressione & Rimonte)
+    # 2) Primo Gol → Esito
     st.subheader("2) ⏱️ Primo Gol → Esito (Pressione & Rimonte)")
     fg = _first_goal_tables(df_ctx, home_team, away_team)
     if fg is None:
@@ -713,18 +745,14 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
             df_["Freq %"] = df_["Freq %"].astype(float)
             st.caption(title)
             st.dataframe(
-                df_,
-                use_container_width=True,
-                height=150,
+                df_, use_container_width=True, height=150,
                 column_config={
                     "Esito": st.column_config.TextColumn(),
                     "Freq %": st.column_config.ProgressColumn(format="%.1f%%", min_value=0.0, max_value=100.0),
                 },
             )
-        with c1:
-            _render_fg(fg["home_first"], f"Se segna prima **{home_team}** (Home-first)")
-        with c2:
-            _render_fg(fg["away_first"], f"Se segna prima **{away_team}** (Away-first)")
+        with c1: _render_fg(fg["home_first"], f"Se segna prima **{home_team}** (Home-first)")
+        with c2: _render_fg(fg["away_first"], f"Se segna prima **{away_team}** (Away-first)")
 
         base = alt.Chart(fg["hist"]).mark_bar().encode(
             x=alt.X("Finestra:N", title="Finestra minuto"),
@@ -735,7 +763,7 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
 
     st.divider()
 
-    # 3) ⚙️ Stile & Ritmo
+    # 3) Stile & Ritmo
     st.subheader("3) ⚙️ Stile & Ritmo (pace / precisione SOT→Gol / save% / BTTS / Over2.5)")
     c1, c2 = st.columns(2)
     def _render_style(block, title):
@@ -752,9 +780,7 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
         }])
         st.caption(title)
         st.dataframe(
-            dfk,
-            use_container_width=True,
-            height=80,
+            dfk, use_container_width=True, height=80,
             column_config={
                 "Pace (tiri tot/match)": st.column_config.NumberColumn(format="%.2f"),
                 "Precisione SOT→Gol %": st.column_config.NumberColumn(format="%.1f"),
@@ -764,14 +790,12 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
                 "Campione":             st.column_config.NumberColumn(format="%.0f"),
             },
         )
-    with c1:
-        _render_style(_style_rhythm_block(df_ctx, home_team, "Home"), f"**{home_team} @casa**")
-    with c2:
-        _render_style(_style_rhythm_block(df_ctx, away_team, "Away"), f"**{away_team} @trasferta**")
+    with c1: _render_style(_style_rhythm_block(df_ctx, home_team, "Home"), f"**{home_team} @casa**")
+    with c2: _render_style(_style_rhythm_block(df_ctx, away_team, "Away"), f"**{away_team} @trasferta**")
 
     st.divider()
 
-    # 4) 🎯 Calibration 1X2
+    # 4) Calibrazione 1X2
     st.subheader("4) 🎯 Calibration 1X2 (Quote → Outcome)")
     with st.expander("Mostra tabelle calibrazione per Home / Draw / Away", expanded=True):
         tabs = st.tabs(["Home", "Draw", "Away"])
@@ -783,24 +807,29 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
                     st.info("Dati insufficienti.")
                 else:
                     st.dataframe(
-                        dfc,
-                        use_container_width=True,
-                        height=220,
+                        dfc, use_container_width=True, height=220,
                         column_config={
                             "Implied %": st.column_config.NumberColumn(format="%.1f"),
                             "Observed %": st.column_config.NumberColumn(format="%.1f"),
                             "Gap %":      st.column_config.NumberColumn(format="+.1f"),
-                            "N":         st.column_config.NumberColumn(format="%.0f"),
-                            "Brier":     st.column_config.NumberColumn(format="%.4f"),
+                            "N":          st.column_config.NumberColumn(format="%.0f"),
+                            "Brier":      st.column_config.NumberColumn(format="%.4f"),
                         },
                     )
-                    ch = alt.Chart(dfc).transform_fold(
-                        ["Implied %","Observed %"], as_=["Serie","Valore"]
-                    ).mark_line(point=True).encode(
+                    # Chart robusto senza transform_fold
+                    df_long = dfc.melt(
+                        id_vars=["Bin Quota"],
+                        value_vars=["Implied %", "Observed %"],
+                        var_name="Serie",
+                        value_name="Valore",
+                    )
+                    df_long["Valore"] = pd.to_numeric(df_long["Valore"], errors="coerce")
+                    df_long = df_long.dropna(subset=["Valore"])
+                    ch = alt.Chart(df_long).mark_line(point=True).encode(
                         x=alt.X("Bin Quota:N", title="Bin di quota"),
                         y=alt.Y("Valore:Q", title="%"),
                         color=alt.Color("Serie:N", legend=alt.Legend(orient="bottom")),
-                        tooltip=["Bin Quota","Serie","Valore"]
+                        tooltip=["Bin Quota", "Serie", alt.Tooltip("Valore:Q", format=".1f")],
                     ).properties(height=180, width="container")
                     st.altair_chart(ch, use_container_width=True)
         _render_calib("Home", 0)
@@ -808,9 +837,7 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
         _render_calib("Away", 2)
 
 
-# ==========================
-# ENTRY POINT (PRE-MATCH)
-# ==========================
+# ========= ENTRY POINT =========
 def run_pre_match(df: pd.DataFrame, db_selected: str):
     st.title("📊 Pre-Match – Analisi per Trader Professionisti")
 
@@ -1119,7 +1146,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             _download_df_button(df_comp.reset_index(), "macro_kpi.csv", "⬇️ Scarica Macro KPI CSV")
 
         st.divider()
-        # 🔥 KPI PLUS — versioni con tabelle professionali
+        # KPI PLUS — tabelle professionali
         render_macro_kpi_plus(df_league_all, squadra_casa, squadra_ospite)
 
     # === TAB 2: ROI mercati ===
@@ -1178,6 +1205,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 "Match Analizzati": st.column_config.NumberColumn(format="%.0f"),
             },
         )
+        _render_glossary_roi()
         _download_df_button(df_roi_all, "roi_markets_all_scopes.csv", "⬇️ Scarica ROI mercati (tutti gli scope)")
 
     # === TAB 3: EV storico squadre ===
@@ -1244,8 +1272,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             st.info("Nessun EV positivo tra Blended e H2H con le quote inserite.")
 
         st.subheader("📋 EV storico per mercato e scope")
+        styled = _style_ev(df_ev_squadre.copy())
         st.dataframe(
-            df_ev_squadre, use_container_width=True, height=380,
+            styled, use_container_width=True, height=380,
             column_config={
                 "Quota": st.column_config.NumberColumn(format="%.2f"),
                 f"{squadra_casa} @Casa %": st.column_config.NumberColumn(format="%.2f"),
@@ -1256,11 +1285,29 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                 "EV H2H": st.column_config.NumberColumn(format="%.2f"),
             },
         )
+        _render_glossary_ev()
         _download_df_button(df_ev_squadre, "ev_storico_squadre.csv", "⬇️ Scarica EV Storico CSV")
 
     # === TAB 4: Statistiche squadre ===
     with tab_stats:
-        render_team_stats_tab(df_league_all, league, squadra_casa, squadra_ospite)
+        st.subheader("Statistiche squadre")
+        # Filtro stagioni SOLO per questa sezione (default stagione corrente)
+        if "Stagione" in df_league_all.columns:
+            seasons_desc = _seasons_desc(df_league_all["Stagione"].dropna().unique().tolist())
+        else:
+            seasons_desc = []
+        with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
+            default_curr = _pick_current_season(seasons_desc) if seasons_desc else []
+            selected_stats_seasons = st.multiselect(
+                "Scegli le stagioni da includere (se vuoto = tutte)",
+                options=seasons_desc,
+                default=default_curr,
+                key=_k("stats_seasons_filter"),
+            )
+        df_stats_scope = df_league_all.copy()
+        if selected_stats_seasons:
+            df_stats_scope = df_stats_scope[df_stats_scope["Stagione"].astype(str).isin([str(s) for s in selected_stats_seasons])]
+        render_team_stats_tab(df_stats_scope, league, squadra_casa, squadra_ospite)
 
     # === TAB 5: Correct Score ===
     with tab_cs:
