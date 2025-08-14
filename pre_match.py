@@ -1,9 +1,9 @@
-# analisi_live_minuto.py — v4.5 ProTrader
-# EV 1X2 Back/Lay, Over 0.5/1.5/2.5/3.5, BTTS • EV Advisor (AI score + Pattern opz.)
+# analisi_live_minuto.py — v4.4 ProTrader
+# EV 1X2 Back/Lay, Over 0.5/1.5/2.5/3.5, BTTS • EV Advisor (AI score + Pattern boost opz.)
 # CS/Hedge, Post-minuto, Campionato/Squadra, Segnali esterni (pattern/squadre/macros)
-# NOVITÀ: normalizzazione *dinamica* delle colonne minuti-gol (auto-detect) → Post-minuto robusto.
+# NUOVO: normalizzazione colonne minuti-gol (robusta) → Post-minuto OK su tutti i dataset.
+#        tooltip/legend, modal guida con formule e Breakdown 1X2.
 
-import re
 import math
 from collections import defaultdict
 import numpy as np
@@ -158,122 +158,51 @@ def sample_badge(n: int) -> str:
     return "🟢 Campione robusto"
 
 # =========================
-# ---- MINUTI GOAL I/O ----
+# ----- MINUTI GOAL ------- (normalizzazione robusta)
 # =========================
-# 1) colonne "sicure" (nomi canonici o molto frequenti)
-_SAFE_HOME = {
-    "minuti goal segnato home", "minuti goal home", "minuti gol home",
-    "minuti goal (home)", "minuti_goal_home", "minuti_gol_home",
-    "minuti goal casa", "minuti gol casa", "minuti home",
-    "minuti goal scored home", "minuti goal segnati home",
-    "minuti goal team home", "minuti_home",
-    "minuti goal h", "mgolh", "minuti_goal_h", "minuti_gol_h",
-    "minuti goal home team", "minuti goal home side",
-    "minuti goal squadra casa", "minuti goal squadra home",
-    "minuti goal segnato home",  # canonico
-    "minuti goal home team",
-    "minuti goal home side",
-    "minuti gol casa (home)", "minuti gol (home)",
-    "minuti goal (casa)", "minuti goal squadra di casa",
-    "minuti goal segnato (home)", "minuti goal segnati (home)",
-    "minuti goal segnati casa",
-    "minuti goal home ft", "minuti goal home live"
-}
-_SAFE_AWAY = {
-    "minuti goal segnato away", "minuti goal away", "minuti gol away",
-    "minuti goal (away)", "minuti_goal_away", "minuti_gol_away",
-    "minuti goal ospite", "minuti gol ospite", "minuti away",
-    "minuti goal scored away", "minuti goal segnati away",
-    "minuti goal team away", "minuti_away",
-    "minuti goal a", "mgola", "minuti_goal_a", "minuti_gol_a",
-    "minuti goal away team", "minuti goal away side",
-    "minuti goal squadra away", "minuti goal squadra ospite",
-    "minuti goal away side",
-    "minuti gol ospiti (away)", "minuti gol (away)",
-    "minuti goal (trasferta)", "minuti goal squadra in trasferta",
-    "minuti goal segnato (away)", "minuti goal segnati (away)",
-    "minuti goal segnati trasferta",
-    "minuti goal away ft", "minuti goal away live"
+GOAL_MINUTE_ALIASES = {
+    "H": ["minuti goal segnato home", "Minuti Goal Home", "mgolh"] +
+         [f"Home Goal {i} (min)" for i in range(1, 13)],
+    "A": ["minuti goal segnato away", "Minuti Goal Away", "mgola"] +
+         [f"Away Goal {i} (min)" for i in range(1, 13)],
 }
 
-# 2) regex dinamici per intercettare numerazioni tipo "Home Goal 1 (min)" / "gh1" / "away_goal_min3", ecc.
-_RE_HOME_MINUTE = re.compile(r"(home[^a-z]*|casa).*?(goal|gol).*?(min|minute)", re.I)
-_RE_AWAY_MINUTE = re.compile(r"(away|trasf|ospit).*?(goal|gol).*?(min|minute)", re.I)
-_RE_GH_NUM      = re.compile(r"^gh\d+$", re.I)   # gh1, gh2, ...
-_RE_GA_NUM      = re.compile(r"^ga\d+$", re.I)   # ga1, ga2, ...
-_RE_HOME_GOAL_N = re.compile(r"^home\s*goal\s*\d+\s*\(min\)$", re.I)
-_RE_AWAY_GOAL_N = re.compile(r"^away\s*goal\s*\d+\s*\(min\)$", re.I)
-
-def _detect_minute_columns(df: pd.DataFrame):
-    """
-    Ritorna due liste (home_cols, away_cols) con tutte le colonne che contengono
-    minuti gol Home/Away. Usa nomi noti + regex euristiche.
-    """
-    home_cols, away_cols = [], []
-    cl = [c for c in df.columns if isinstance(c, str)]
-    low = {c: c.strip().lower() for c in cl}
-
-    for c in cl:
-        l = low[c]
-        if l in _SAFE_HOME: home_cols.append(c)
-        if l in _SAFE_AWAY: away_cols.append(c)
-
-        if _RE_HOME_MINUTE.search(l) or _RE_HOME_GOAL_N.match(l) or _RE_GH_NUM.match(l):
-            if c not in home_cols: home_cols.append(c)
-        if _RE_AWAY_MINUTE.search(l) or _RE_AWAY_GOAL_N.match(l) or _RE_GA_NUM.match(l):
-            if c not in away_cols: away_cols.append(c)
-
-    # fallback per colonne "Minuti Goal Home/Away" capitalizzate
-    if "Minuti Goal Home" in df.columns and "Minuti Goal Home" not in home_cols:
-        home_cols.append("Minuti Goal Home")
-    if "Minuti Goal Away" in df.columns and "Minuti Goal Away" not in away_cols:
-        away_cols.append("Minuti Goal Away")
-
-    return home_cols, away_cols
-
-def _row_minutes_concat_from_cols(row, cols):
-    """
-    Concatena minuti presenti su 'cols' in una stringa 'm1;m2;...'.
-    Accetta sia stringhe tipo '12;45' che singoli numeri (int/float).
-    """
-    vals = []
-    for col in cols:
-        if col not in row: continue
+def _row_minutes_concat(row, side: str) -> str:
+    vals: list[str] = []
+    for col in GOAL_MINUTE_ALIASES[side]:
+        if col not in row:
+            continue
         v = row[col]
-        if pd.isna(v) or str(v).strip() == "": continue
+        if pd.isna(v) or str(v).strip() == "":
+            continue
         s = str(v).strip()
-        if s.replace(".", "", 1).isdigit():  # singolo numero (anche '37.0')
+        # singolo minuto (es. '37' o '37.0')
+        if s.replace(".", "", 1).isdigit():
             try:
                 mins = [int(float(s))]
-            except Exception:
+            except:
                 mins = []
         else:
+            # sequenza '12;45;78'
             mins = extract_minutes(pd.Series([s]))
         for m in mins:
-            if 0 < int(m) <= 130:
-                vals.append(int(m))
-    vals = sorted(set(vals))
-    return ";".join(str(x) for x in vals)
+            if 0 < m <= 130:
+                vals.append(str(int(m)))
+    vals_uniq = sorted({int(x) for x in vals})
+    return ";".join(str(x) for x in vals_uniq)
 
 def unify_goal_minute_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Crea (se mancanti/da rigenerare) le colonne canoniche:
+    Crea (se mancanti) le colonne canoniche:
       - 'minuti goal segnato home'
       - 'minuti goal segnato away'
-    individuando dinamicamente tutte le colonne minute rilevanti.
+    Leggendo tutte le varianti note presenti nel df.
     """
     df = df.copy()
-    hcols, acols = _detect_minute_columns(df)
-
-    # se già presenti, le manteniamo — ma se sono vuote proviamo a rigenerarle
-    need_home = "minuti goal segnato home" not in df.columns or (df["minuti goal segnato home"].fillna("").eq("").all() and len(hcols)>0)
-    need_away = "minuti goal segnato away" not in df.columns or (df["minuti goal segnato away"].fillna("").eq("").all() and len(acols)>0)
-
-    if need_home:
-        df["minuti goal segnato home"] = df.apply(lambda r: _row_minutes_concat_from_cols(r, hcols), axis=1)
-    if need_away:
-        df["minuti goal segnato away"] = df.apply(lambda r: _row_minutes_concat_from_cols(r, acols), axis=1)
-
+    if "minuti goal segnato home" not in df.columns:
+        df["minuti goal segnato home"] = df.apply(lambda r: _row_minutes_concat(r, "H"), axis=1)
+    if "minuti goal segnato away" not in df.columns:
+        df["minuti goal segnato away"] = df.apply(lambda r: _row_minutes_concat(r, "A"), axis=1)
     return df
 
 # =========================
@@ -431,7 +360,10 @@ def _style_table(df_):
     if "Fair"  in df_.columns: fmt_map["Fair"]  = _fmt_fair
     if "EV"    in df_.columns: fmt_map["EV"]    = "{:.3f}"
     if "Edge"  in df_.columns: fmt_map["Edge"]  = "{:.3f}"
-    if "½-Kelly %" in df_.columns: fmt_map["½-Kelly %"] = "{:.1f}%"
+    if "½-Kelly % in df_.columns": pass  # safety
+
+    if "½-Kelly %" in df_.columns:
+        fmt_map["½-Kelly %"] = "{:.1f}%"
 
     for col in df_.columns:
         if str(col).endswith("%") and col not in fmt_map:
@@ -561,6 +493,7 @@ def _open_help_btn():
 def _render_modal_if_needed():
     if not st.session_state.get("show_help_ev"): 
         return
+    # Modal markup
     st.markdown("""
     <div class="modal-mask">
       <div class="modal">
@@ -715,7 +648,7 @@ def run_live_minute_analysis(df: pd.DataFrame):
             with oc4: q_over35 = st.number_input("Over 3.5", 1.01, 50.0, 3.75, step=0.01, help="Quota live Over 3.5.")
             with oc5: q_btts   = st.number_input("BTTS (GG)", 1.01, 50.0, 2.10, step=0.01, help="Quota live Entrambe segnano.")
 
-        # Write-back verso Pre-Match (incl. O0.5)
+        # Write-back verso Pre-Match (anche O0.5)
         for k,v in [("ov05",q_over05),("ov15",q_over15),("ov25",q_over25),("ov35",q_over35),("btts",q_btts)]:
             _set_shared_quote(k, v)
 
@@ -742,9 +675,8 @@ def run_live_minute_analysis(df: pd.DataFrame):
 
     df = df.copy()
     if "Label" not in df.columns: df["Label"] = df.apply(label_match, axis=1)
+    # filtra campionato+label e normalizza colonne minuti-gol (fondamentale per Post-minuto e matching)
     df_league = df[(df["country"]==champ) & (df["Label"]==label_live)].copy()
-
-    # 🔧 NORMALIZZA colonne minuti-gol (auto-detect) PRIMA di fare matching/post-minuto
     df_league = unify_goal_minute_columns(df_league)
 
     df_matched   = _matches_matching_state(df_league, current_min, live_h, live_a)
