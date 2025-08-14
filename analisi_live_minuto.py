@@ -639,7 +639,11 @@ def run_live_minute_analysis(df: pd.DataFrame):
                 {"Esito":"X","p_main":pD_L,"n_main":len(df_matched),"p_side":p_draw_side,"n_side":len(df_home_side)+len(df_away_side),"p_final":p_draw,"prior":priors["X"],"Δ":p_draw-priors["X"]},
                 {"Esito":"2","p_main":pA_L,"n_main":len(df_matched),"p_side":pA_A,"n_side":len(df_away_side),"p_final":p_away,"prior":priors["2"],"Δ":p_away-priors["2"]},
             ])
-            st.dataframe(expl.style.format("{:.3f}"), use_container_width=True)
+            # formatto SOLO le colonne numeriche (evito l'errore sulle stringhe)
+	    num_cols = [c for c in expl.columns if pd.api.types.is_numeric_dtype(expl[c])]
+	    fmt = {c: "{:.3f}" for c in num_cols}
+	    st.dataframe(expl.style.format(fmt), use_container_width=True)
+
             st.caption("p_final = weighted blend(p_main, p_side) con cap su pesi; EV calcolato su p_final; AI score ↑ se EV>0, campione solido e Δ vs prior alto. I Pattern (se attivati) **modulano solo l’AI score** per evidenziare opportunità coerenti col contesto.")
 
     # ---------- CAMPIONATO ----------
