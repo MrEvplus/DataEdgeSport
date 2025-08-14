@@ -1,7 +1,8 @@
-# analisi_live_minuto.py — v4.5 ProTrader
+# analisi_live_minuto.py — v4.6 ProTrader (con cache in sessione)
 # EV 1X2 Back/Lay, Over 0.5/1.5/2.5/3.5, BTTS • EV Advisor (AI score + Pattern opz.)
 # CS/Hedge, Post-minuto, Campionato/Squadra, Segnali esterni (pattern/squadre/macros)
 # NOVITÀ: normalizzazione *dinamica* delle colonne minuti-gol (auto-detect) → Post-minuto robusto.
+#         + CACHE in sessione: (1) sotto-dataset campionato+label normalizzato, (2) match "stesso stato".
 
 import re
 import math
@@ -275,6 +276,48 @@ def unify_goal_minute_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["minuti goal segnato away"] = df.apply(lambda r: _row_minutes_concat_from_cols(r, acols), axis=1)
 
     return df
+
+# =========================
+# ====== SPEED-UP CACHE ===
+# =========================
+def _league_cache_key(champ: str, label: str) -> str:
+    return f"cache:league_norm:{champ}:{label}"
+
+def get_df_league_cached(df: pd.DataFrame, champ: str, label: str) -> pd.DataFrame:
+    """
+    Ritorna il sotto-dataset di campionato+label già NORMALIZZATO (minuti gol).
+    Calcolato una volta per sessione, poi riusato.
+    """
+    k = _league_cache_key(champ, label)
+    if k in st.session_state:
+        return st.session_state[k]
+
+    sub = df[(df["country"].astype(str) == str(champ)) & (df["Label"].astype(str) == str(label))].copy()
+    sub = unify_goal_minute_columns(sub)  # normalizza una sola volta per sessione
+
+    st.session_state[k] = sub
+    return sub
+
+def _match_cache_key(champ: str, label: str, minute: int, score: tuple, home: str, away: str) -> str:
+    s = f"{score[0]}-{score[1]}"
+    return f"cache:matched:{champ}:{label}:{minute}:{s}:{home}:{away}"
+
+def get_matched_cached(df_league: pd.DataFrame, current_min: int, live_h: int, live_a: int,
+                       home_team: str, away_team: str, champ: str, label: str):
+    """
+    Ritorna (df_matched, df_home_side, df_away_side) già calcolati e riusabili.
+    Chiave = campionato+label+minuto+score+home+away.
+    """
+    k = _match_cache_key(champ, label, current_min, (live_h, live_a), home_team, away_team)
+    if k in st.session_state:
+        return st.session_state[k]
+
+    df_matched   = _matches_matching_state(df_league, current_min, live_h, live_a)
+    df_home_side = _matches_matching_state(df_league[df_league["Home"]==home_team], current_min, live_h, live_a)
+    df_away_side = _matches_matching_state(df_league[df_league["Away"]==away_team], current_min, live_h, live_a)
+
+    st.session_state[k] = (df_matched, df_home_side, df_away_side)
+    return st.session_state[k]
 
 # =========================
 # ----------- EV ----------
@@ -741,15 +784,19 @@ def run_live_minute_analysis(df: pd.DataFrame):
     q_btts, show_ext = ctx["q_btts"], ctx["show_ext"]
 
     df = df.copy()
-    if "Label" not in df.columns: df["Label"] = df.apply(label_match, axis=1)
-    df_league = df[(df["country"]==champ) & (df["Label"]==label_live)].copy()
+    if "Label" not in df.columns:
+        df["Label"] = df.apply(label_match, axis=1)
 
-    # 🔧 NORMALIZZA colonne minuti-gol (auto-detect) PRIMA di fare matching/post-minuto
-    df_league = unify_goal_minute_columns(df_league)
+    # salva label per eventuali altre componenti
+    st.session_state["_label_live"] = label_live
 
-    df_matched   = _matches_matching_state(df_league, current_min, live_h, live_a)
-    df_home_side = _matches_matching_state(df_league[df_league["Home"]==home_team], current_min, live_h, live_a)
-    df_away_side = _matches_matching_state(df_league[df_league["Away"]==away_team], current_min, live_h, live_a)
+    # ⏩ usa CACHE per campionato+label (già normalizzato minuti-gol)
+    df_league = get_df_league_cached(df, champ, label_live)
+
+    # ⏩ usa CACHE per i match "stesso stato"
+    df_matched, df_home_side, df_away_side = get_matched_cached(
+        df_league, current_min, live_h, live_a, home_team, away_team, champ, label_live
+    )
 
     st.caption(f"✅ Campione: {len(df_matched)} | {sample_badge(len(df_matched))} • Team focus: {home_team} / {away_team}")
 
