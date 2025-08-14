@@ -111,32 +111,48 @@ def extract_minutes(series: pd.Series) -> List[int]:
 def load_data_from_supabase(
     parquet_label: str = "Parquet file URL (Supabase Storage):",
     selectbox_key: str = "selectbox_campionato_duckdb",
+    ui_mode: str = "full",           # "full" = selettori in sidebar; "minimal" = niente Campionato/Stagioni
+    show_url_input: bool = True,     # mostra/nascondi input URL nel sidebar
 ) -> Tuple[pd.DataFrame, str]:
     """
-    Wrapper UI: chiede URL Parquet, campionato e stagioni.
-    Esegue poi un fetch *filtrato* (DuckDB se disponibile, altrimenti pandas in memoria) con cache.
-    Ritorna (df, campionato_selezionato).
-    """
-    st.sidebar.markdown("### 🌐 Origine: Supabase Storage (Parquet via DuckDB)")
+    Carica il parquet da Supabase Storage (via DuckDB).
+    - ui_mode="minimal": NON mostra i selettori 'Seleziona Campionato' e 'Seleziona stagioni' nel sidebar.
+                         Restituisce il DataFrame completo (filtri gestiti altrove, es. Pre-Match Hub).
+    - ui_mode="full":    comportamento precedente con selettori nel sidebar e fetch filtrato.
 
-    parquet_url: str = st.sidebar.text_input(
-        parquet_label,
-        value=st.secrets.get(
-            "PARQUET_URL",
-            "https://<TUO-PROGETTO>.supabase.co/storage/v1/object/public/partite.parquet/latest.parquet",
-        ),
-        key=f"{selectbox_key}__url",
-    ).strip()
+    Ritorna: (df, db_selected) dove db_selected è una stringa descrittiva dell'origine.
+    """
+    st.sidebar.markdown("**🗄️ Origine: Supabase Storage (Parquet via DuckDB)**")
+
+    parquet_url: str = st.secrets.get(
+        "PARQUET_URL",
+        "https://<TUO-PROGETTO>.supabase.co/storage/v1/object/public/partite.parquet/latest.parquet",
+    )
+    if show_url_input:
+        parquet_url = st.sidebar.text_input(
+            parquet_label,
+            value=st.session_state.get("parquet_url", parquet_url),
+            key=f"{selectbox_key}__url",
+            help="Incolla l'URL (o path) al file parquet su Supabase Storage."
+        ).strip()
+        st.session_state["parquet_url"] = parquet_url
 
     if not parquet_url:
-        st.warning("Inserisci l'URL del Parquet in Supabase Storage.")
-        st.stop()
+        st.warning("Inserisci l'URL del parquet per continuare.")
+        return pd.DataFrame(), "Supabase: (URL mancante)"
 
+    # --- Modalità MINIMAL: nessun selettore in sidebar, carico tutto e i filtri si applicano nel Pre-Match ---
+    if ui_mode == "minimal":
+        df = _read_parquet_filtered(parquet_url, league="", seasons=tuple())
+        st.sidebar.checkbox(f"Righe caricate: {len(df):,}", value=True, key="rows_loaded_checkbox", disabled=True)
+        return df, f"Supabase: {parquet_url}"
+
+    # --- Modalità FULL (comportamento precedente): selettori nel sidebar ---
     # Carico SOLO meta per popolare i menu (campionati/stagioni)
     leagues_df = _duckdb_select_distinct(parquet_url, cols=("country", "sezonul"))
     if leagues_df.empty:
         st.warning("⚠️ Nessun dato trovato nel Parquet.")
-        st.stop()
+        return pd.DataFrame(), f"Supabase: {parquet_url}"
 
     leagues = sorted(leagues_df["country"].dropna().astype(str).unique()) if "country" in leagues_df.columns else []
     league = st.sidebar.selectbox(
@@ -162,50 +178,8 @@ def load_data_from_supabase(
     )
 
     df = _read_parquet_filtered(parquet_url, league, tuple(seasons_sel))
-
-    # Mapping canonico essenziale (se arrivano colonne grezze)
-    col_map = {
-        "country": "country",
-        "sezonul": "Stagione",
-        "txtechipa1": "Home",
-        "txtechipa2": "Away",
-        "scor1": "Home Goal FT",
-        "scor2": "Away Goal FT",
-        "scorp1": "Home Goal 1T",
-        "scorp2": "Away Goal 1T",
-        "cotaa": "Odd home",
-        "cotad": "Odd Away",
-        "cotae": "Odd Draw",
-        "mgolh": "minuti goal segnato home",
-        "mgola": "minuti goal segnato away",
-        "datameci": "Data",
-        "orameci": "Orario",
-    }
-    df = df.rename(columns=col_map)
-
-    # Cast mirati e dtypes stretti
-    for col in ("Odd home", "Odd Away", "Odd Draw"):
-        if col in df.columns:
-            df[col] = (
-                df[col].astype(str).str.replace(",", ".", regex=False)
-                  .replace("nan", np.nan).astype(float)
-            ).astype("Float32")
-
-    for col in ("Home Goal FT", "Away Goal FT", "Home Goal 1T", "Away Goal 1T"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int16")
-
-    if "country" in df.columns:
-        df["country"] = df["country"].astype("category")
-    if "Home" in df.columns:
-        df["Home"] = df["Home"].astype("category")
-    if "Away" in df.columns:
-        df["Away"] = df["Away"].astype("category")
-    if "Data" in df.columns:
-        df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
-
-    st.sidebar.write(f"✅ Righe caricate: {len(df):,}")
-    return df, league
+    st.sidebar.checkbox(f"Righe caricate: {len(df):,}", value=True, key="rows_loaded_checkbox", disabled=True)
+    return df, f"Supabase: {parquet_url}"
 
 @st.cache_data(show_spinner=False, ttl=900)
 def _read_parquet_filtered(parquet_url: str, league: str, seasons: Tuple[str, ...]) -> pd.DataFrame:
@@ -284,8 +258,10 @@ def _duckdb_select_distinct(parquet_url: str, cols: Iterable[str]) -> pd.DataFra
 # ---------------------------------------------------------------------
 # Upload manuale (CSV/XLSX) con pulizia minima e dtypes
 # ---------------------------------------------------------------------
-def load_data_from_file() -> Tuple[pd.DataFrame, str]:
-    st.sidebar.markdown("### 📂 Origine: Upload Manuale")
+def load_data_from_file(
+    ui_mode: str = "minimal",   # di default nascondiamo i selettori; i filtri globali si scelgono nel Pre-Match
+) -> Tuple[pd.DataFrame, str]:
+    st.sidebar.markdown("**📂 Origine: Upload Manuale**")
 
     uploaded_file = st.sidebar.file_uploader(
         "Carica il tuo file Excel o CSV:",
@@ -295,7 +271,7 @@ def load_data_from_file() -> Tuple[pd.DataFrame, str]:
 
     if uploaded_file is None:
         st.info("ℹ️ Carica un file per continuare.")
-        st.stop()
+        return pd.DataFrame(), "Upload: (nessun file)"
 
     # Riconosci CSV o Excel
     if uploaded_file.name.lower().endswith(".csv"):
@@ -321,7 +297,12 @@ def load_data_from_file() -> Tuple[pd.DataFrame, str]:
         if dcol in df.columns:
             df[dcol] = pd.to_datetime(df[dcol], errors="coerce")
 
-    # Selezione campionato
+    # --- Modalità MINIMAL: niente selettori nel sidebar, i filtri si applicano altrove ---
+    if ui_mode == "minimal":
+        st.sidebar.checkbox(f"Righe caricate da Upload: {len(df):,}", value=True, key="rows_loaded_upload", disabled=True)
+        return df, f"Upload: {uploaded_file.name}"
+
+    # --- Modalità FULL (comportamento precedente) ---
     if "country" in df.columns:
         leagues = sorted(df["country"].dropna().astype(str).unique())
     else:
@@ -353,5 +334,5 @@ def load_data_from_file() -> Tuple[pd.DataFrame, str]:
     if seasons_sel and "sezonul" in df_filtered.columns:
         df_filtered = df_filtered[df_filtered["sezonul"].astype(str).isin(seasons_sel)]
 
-    st.sidebar.write(f"✅ Righe caricate da Upload Manuale: {len(df_filtered):,}")
-    return df_filtered, league
+    st.sidebar.checkbox(f"Righe caricate da Upload: {len(df_filtered):,}", value=True, key="rows_loaded_upload", disabled=True)
+    return df_filtered, f"Upload: {uploaded_file.name}"
