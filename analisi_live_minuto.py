@@ -1,4 +1,4 @@
-# analisi_live_minuto.py — v3.8 ProTrader
+# analisi_live_minuto.py — v3.9 ProTrader (UI polish)
 # UI professionale a TAB per trader di calcio + EV 1X2 Back/Lay, Over 0.5/1.5/2.5/3.5, BTTS
 # EV Advisor (AI score), CS/Hedge, segnali esterni (pattern/squadre/macros), write-back per Pre-Match.
 # LOGICA PREESISTENTE INVARIATA, SOLO ESTENSIONI/UX.
@@ -55,6 +55,16 @@ table td, table th {vertical-align: middle;}
 .kpi .mid {background:var(--warn);}
 .kpi .low {background:var(--danger);}
 .hint {color: var(--muted); font-size: .9rem;}
+.card {background: var(--card); border: 1px solid var(--chip-border); border-radius: .9rem; padding: 1rem;}
+.card h4 {margin: 0 0 .5rem 0; font-size: 1.05rem;}
+.grid {display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap:.5rem .75rem;}
+.kv {display:flex; justify-content:space-between; gap:.5rem; font-size:.95rem;}
+.kv span:first-child {color: var(--muted);}
+.pills {display:flex; flex-wrap:wrap; gap:.5rem;}
+.pill {padding:.25rem .55rem; border-radius:999px; border:1px solid var(--chip-border); background:var(--chip); font-size:.75rem;}
+.good {background: var(--accent-soft);}
+.warn {background: var(--warn-soft);}
+.bad  {background: var(--danger-soft);}
 </style>
 """
 
@@ -202,7 +212,7 @@ def get_external_signals(df_league, home_team, away_team):
 # =========================
 # -- POST-MINUTE TABLE ----
 # =========================
-def compute_post_minute_stats(df, current_min, label=""):
+def compute_post_minute_stats(df, current_min):
     tf_bands = [(0,15),(16,30),(31,45),(46,60),(61,75),(76,90)]
     tf_labels = [f"{a}-{b}" for a,b in tf_bands]
     rec = {lbl: {"GF":0,"GS":0,"1+":0,"2+":0,"N":0} for lbl in tf_labels}
@@ -290,6 +300,56 @@ def _style_table(df_):
             sty = sty.apply(_bg_posneg, subset=[c])
     return sty
 
+# ======== helpers Segnali (solo UI) ========
+def _pct_str(x):
+    try:
+        return f"{float(x):.2f}%"
+    except Exception:
+        s = str(x)
+        return s if s.endswith("%") else f"{s}%"
+
+def _card_macro(title: str, stats: dict):
+    if not isinstance(stats, dict):
+        st.write("—")
+        return
+    win = _pct_str(stats.get("Win %", stats.get("Win%", stats.get("Win", ""))))
+    draw = _pct_str(stats.get("Draw %", stats.get("Draw%", stats.get("Draw", ""))))
+    loss = _pct_str(stats.get("Loss %", stats.get("Loss%", stats.get("Loss", ""))))
+    avg_for = stats.get("Avg Goals Scored", stats.get("GF avg", stats.get("GF", "-")))
+    avg_ag  = stats.get("Avg Goals Conceded", stats.get("GA avg", stats.get("GA", "-")))
+    btts    = _pct_str(stats.get("BTTS %", stats.get("BTTS%", stats.get("BTTS", ""))))
+    mp      = stats.get("Matches Played", stats.get("Matches", "-"))
+    st.markdown(f"""
+    <div class="card">
+      <h4>{title}</h4>
+      <div class="grid">
+        <div class="kv"><span>Matches</span><b>{mp}</b></div>
+        <div class="kv"><span>BTTS%</span><b>{btts}</b></div>
+        <div class="kv"><span>Win%</span><b>{win}</b></div>
+        <div class="kv"><span>Draw%</span><b>{draw}</b></div>
+        <div class="kv"><span>Loss%</span><b>{loss}</b></div>
+        <div class="kv"><span>Avg GF</span><b>{avg_for}</b></div>
+        <div class="kv"><span>Avg GA</span><b>{avg_ag}</b></div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def _pills_from_patterns(pattern_obj):
+    # pattern_obj può essere lista o dict. Creiamo etichette leggibili.
+    pills = []
+    try:
+        if isinstance(pattern_obj, dict):
+            items = sorted(pattern_obj.items(), key=lambda kv: str(kv[0]))
+            for k,v in items:
+                label = f"{k}: {v}"
+                pills.append(label)
+        elif isinstance(pattern_obj, list):
+            for it in pattern_obj:
+                pills.append(str(it))
+    except Exception:
+        pass
+    return pills
+
 # =========================
 # ---------- MAIN ---------
 # =========================
@@ -358,13 +418,13 @@ def run_live_minute_analysis(df: pd.DataFrame):
         live_h, live_a = parsed
 
         label_live = label_match({"Odd home": odd_home, "Odd Away": odd_away})
-        chip_html = f"""
-        <span class='badge'>🔖 <b>{label_live}</b></span>
-        <span class='badge'>⏱️ <b>{current_min}'</b></span>
-        <span class='badge'>📟 <b>{live_h}-{live_a}</b></span>
-        <span class='badge small'>campionato <b>{champ}</b></span>
-        """
-        st.markdown(chip_html, unsafe_allow_html=True)
+        st.markdown(
+            f"<span class='badge'>🔖 <b>{label_live}</b></span> "
+            f"<span class='badge'>⏱️ <b>{current_min}'</b></span> "
+            f"<span class='badge'>📟 <b>{live_h}-{live_a}</b></span> "
+            f"<span class='badge small'>campionato <b>{champ}</b></span>",
+            unsafe_allow_html=True
+        )
 
         with st.expander("⚙️ Quote mercati Goal/BTTS (per EV)", expanded=False):
             oc1, oc2, oc3, oc4, oc5 = st.columns(5)
@@ -506,6 +566,14 @@ def run_live_minute_analysis(df: pd.DataFrame):
             use_container_width=True, height=420
         )
 
+        # ⬇️ CSV snapshot
+        st.download_button(
+            "⬇️ Esporta ranking EV (CSV)",
+            data=view.to_csv(index=False).encode("utf-8"),
+            file_name="ev_advisor_snapshot.csv",
+            mime="text/csv"
+        )
+
         # Hedging rapido per top Back
         top_back = view[(view["Tipo"]=="Back") & (view["EV"]>0)].head(3).to_dict(orient="records")
         if top_back:
@@ -595,7 +663,6 @@ def run_live_minute_analysis(df: pd.DataFrame):
         # --- CS / Hedge
         with t4:
             if len(df_matched):
-                # lambda residui (vista Home/Away neutra)
                 lam_for, lam_against = estimate_remaining_lambdas(df_matched, current_min, True)
                 top_cs = final_cs_distribution(lam_for, lam_against, live_h, live_a, max_goals_delta=6)[:6]
                 st.write("**Top Correct Score (probabilità)**")
@@ -633,11 +700,9 @@ def run_live_minute_analysis(df: pd.DataFrame):
         st.subheader(f"📈 Squadra — {home_team} (Home) / {away_team} (Away)")
         t1, t2, t3, t4 = st.tabs(["Esiti 1X2", "Over / EV", "Post-minuto", "CS / Hedge"])
 
-        # scegli df_team di focus: se probabilità Home > Away uso df_home_side, altrimenti df_away_side (solo per vista)
         df_team_focus = df_home_side if p_home >= p_away else df_away_side
         team_name = home_team if p_home >= p_away else away_team
 
-        # --- Esiti 1X2 (relativi al team focus)
         with t1:
             if len(df_team_focus):
                 if team_name == home_team:
@@ -648,10 +713,8 @@ def run_live_minute_analysis(df: pd.DataFrame):
                     win  = (df_team_focus["Away Goal FT"] > df_team_focus["Home Goal FT"]).mean()
                     draw = (df_team_focus["Away Goal FT"] == df_team_focus["Home Goal FT"]).mean()
                     lose = (df_team_focus["Away Goal FT"] < df_team_focus["Home Goal FT"]).mean()
-                # normalizza
                 s = max(1e-9, win+draw+lose)
                 win,draw,lose = win/s, draw/s, lose/s
-                # EV su 1X2 (riuso quote globali; trader può leggere contesto)
                 d = pd.DataFrame([
                     {"Esito":f"{team_name} Win","Prob %":win*100,"Fair":1/max(win,1e-9),
                      "Back q":(odd_home if team_name==home_team else odd_away),
@@ -667,7 +730,6 @@ def run_live_minute_analysis(df: pd.DataFrame):
             else:
                 st.info("Nessun match squadra con questo stato.")
 
-        # --- Over / EV (team focus)
         with t2:
             if len(df_team_focus):
                 rows=[]
@@ -686,14 +748,12 @@ def run_live_minute_analysis(df: pd.DataFrame):
             else:
                 st.info("Nessun match squadra per Over/EV.")
 
-        # --- Post-minuto (team focus)
         with t3:
             if len(df_team_focus):
                 st.dataframe(compute_post_minute_stats(df_team_focus, current_min), use_container_width=True)
             else:
                 st.info("Nessun match squadra per post-minuto.")
 
-        # --- CS / Hedge (team focus)
         with t4:
             if len(df_team_focus):
                 lam_for_T, lam_against_T = estimate_remaining_lambdas(df_team_focus, current_min, team_name==home_team)
@@ -704,22 +764,45 @@ def run_live_minute_analysis(df: pd.DataFrame):
                 st.info("Nessun match squadra per stimare CS.")
 
     # =======================
-    # SEGNALI ESTERNI
+    # SEGNALI ESTERNI (UI)
     # =======================
     with tab_signals:
         st.subheader("🧩 Segnali esterni (pattern, macro KPI, bias lega)")
         if show_ext:
             ext = get_external_signals(df_league, home_team, away_team)
-            if ext.get("macro_home") or ext.get("pattern_signals") or ext.get("macros_bias"):
-                if ext.get("macro_home") and ext.get("macro_away"):
-                    st.write("**Macro KPI (estratto)**")
-                    st.json({"Home": ext["macro_home"], "Away": ext["macro_away"]})
+            has_any = ext.get("macro_home") or ext.get("macro_away") or ext.get("pattern_signals") or ext.get("macros_bias")
+            if has_any:
+                # Macro KPI cards
+                if ext.get("macro_home") or ext.get("macro_away"):
+                    st.markdown("**Macro KPI (estratto)**")
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        _card_macro(f"Home — {home_team}", ext.get("macro_home", {}))
+                    with c2:
+                        _card_macro(f"Away — {away_team}", ext.get("macro_away", {}))
+
+                # Pattern → pills
                 if ext.get("pattern_signals"):
-                    st.write("**Pattern live**")
-                    st.json(ext["pattern_signals"])
+                    st.markdown("**Pattern live**")
+                    pills = _pills_from_patterns(ext["pattern_signals"])
+                    if pills:
+                        st.markdown(
+                            "<div class='pills'>" + " ".join([f"<span class='pill good'>{p}</span>" for p in pills]) + "</div>",
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.caption("Nessun pattern forte rilevato.")
+
+                # Bias lega (macros)
                 if ext.get("macros_bias"):
-                    st.write("**Bias lega (macros)**")
-                    st.json(ext["macros_bias"])
+                    st.markdown("**Bias lega (macros)**")
+                    bias = ext["macros_bias"]
+                    try:
+                        df_bias = pd.DataFrame([bias])
+                        st.dataframe(df_bias, use_container_width=True)
+                    except Exception:
+                        st.json(bias)
+
                 if ext.get("notes"):
                     st.caption(" • ".join(ext["notes"]))
             else:
