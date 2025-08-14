@@ -785,44 +785,39 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
 
         dfm = pd.DataFrame([base])
 
-        # --- Stile + FORMATTING numerico con segno e decimali (fix +.1f) ---
-        styled = _df_style_positive_negative(
+        # --- Stile + FORMATTING numerico con segno e decimali (fix "+.1f") ---
+        sty = _df_style_positive_negative(
             dfm,
             pos_good_cols=["Δ Win%","Δ GF","Δ ELO","Δ Form"],
             neg_good_cols=["Δ Loss%","Δ GA"]
-        )
-
-        st.dataframe(
-            styled,  # <-- qui
-            use_container_width=True, height=88,
-            column_config={
-                "Δ Win%":  st.column_config.NumberColumn(format="%+.1f"),
-                "Δ Draw%": st.column_config.NumberColumn(format="%+.1f"),
-                "Δ Loss%": st.column_config.NumberColumn(format="%+.1f"),
-                "Δ GF":    st.column_config.NumberColumn(format="%+.2f"),
-                "Δ GA":    st.column_config.NumberColumn(format="%+.2f"),
-                "Δ ELO":   st.column_config.NumberColumn(format="%+.1f"),
-                "Δ Form":  st.column_config.NumberColumn(format="%+.2f"),
-                "N (ultime)": st.column_config.NumberColumn(format="%.0f"),
-                "N (tot)":    st.column_config.NumberColumn(format="%.0f"),
-            },
-        )
-
-        # ---------------------------------------------------------------
+        ).format({
+            "Δ Win%":  "{:+.1f}",
+            "Δ Draw%": "{:+.1f}",
+            "Δ Loss%": "{:+.1f}",
+            "Δ GF":    "{:+.2f}",
+            "Δ GA":    "{:+.2f}",
+            "Δ ELO":   "{:+.1f}",
+            "Δ Form":  "{:+.2f}",
+            "N (ultime)": "{:.0f}",
+            "N (tot)":    "{:.0f}",
+        })
+        # ----------------------------------------------------------------------
 
         st.caption(
             f"**{title}** — campione: {base['N (tot)']} • recenti: {base['N (ultime)']} • affidabilità: {base['Affidabilità']}"
         )
         st.dataframe(
-            sty, use_container_width=True, height=88,
+            sty,
+            use_container_width=True,
+            height=88,
             column_config={
-                "Δ Win%":  st.column_config.NumberColumn(format="%+.1f"),
-                "Δ Draw%": st.column_config.NumberColumn(format="%+.1f"),
-                "Δ Loss%": st.column_config.NumberColumn(format="%+.1f"),
-                "Δ GF":    st.column_config.NumberColumn(format="%+.2f"),
-                "Δ GA":    st.column_config.NumberColumn(format="%+.2f"),
-                "Δ ELO":   st.column_config.NumberColumn(format="%+.1f"),
-                "Δ Form":  st.column_config.NumberColumn(format="%+.2f"),
+                "Δ Win%":   st.column_config.NumberColumn(format="+.1f"),
+                "Δ Draw%":  st.column_config.NumberColumn(format="+.1f"),
+                "Δ Loss%":  st.column_config.NumberColumn(format="+.1f"),
+                "Δ GF":     st.column_config.NumberColumn(format="+.2f"),
+                "Δ GA":     st.column_config.NumberColumn(format="+.2f"),
+                "Δ ELO":    st.column_config.NumberColumn(format="+.1f"),
+                "Δ Form":   st.column_config.NumberColumn(format="+.2f"),
                 "N (ultime)": st.column_config.NumberColumn(format="%.0f"),
                 "N (tot)":    st.column_config.NumberColumn(format="%.0f"),
             },
