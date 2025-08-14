@@ -1,4 +1,4 @@
-# app.py — ProTrader Hub (snellito ma con MAPPING & PULIZIA completi)
+# app.py — ProTrader Hub (campionato & stagioni selezionati in Pre-Match)
 from __future__ import annotations
 
 import os
@@ -10,7 +10,7 @@ import pandas as pd
 import numpy as np
 
 # -------------------------------------------------------
-# Loader robusto per moduli locali (evita conflitti nome)
+# Loader robusto per moduli locali
 # -------------------------------------------------------
 BASE_DIR = os.path.dirname(__file__)
 
@@ -95,10 +95,7 @@ def _safe_to_datetime(series: pd.Series) -> pd.Series:
         return pd.to_datetime(series.astype(str), errors="coerce")
 
 def _season_sort_key(x: str) -> int:
-    """
-    Ordina stagioni estraendo l'ANNO PIÙ RECENTE presente nella stringa.
-    Supporta: '2024-2025', '2024/25', '2024–25', '2025', '24/25', ecc.
-    """
+    """Chiave numerica per ordinare stagioni: prende l'ANNO PIÙ RECENTE presente nella stringa."""
     if x is None:
         return -1
     s = str(x)
@@ -110,10 +107,6 @@ def _season_sort_key(x: str) -> int:
     return max(vals)
 
 def _concat_minutes(row: pd.Series, prefixes: list[str]) -> str:
-    """
-    Se nel dataset esistono colonne 'gh1..gh9'/'ga1..ga9' le concatena in stringa 'm1,m2,...'
-    Utile a ricostruire 'minuti goal segnato home/away' se mancanti.
-    """
     mins = []
     for p in prefixes:
         for i in range(1, 10):
@@ -128,6 +121,39 @@ def _concat_minutes(row: pd.Series, prefixes: list[str]) -> str:
     mins.sort()
     return ",".join(str(m) for m in mins)
 
+# —— FILTRI GLOBALI (selezionati in Pre-Match) ——
+GLOBAL_CHAMP_KEY   = "global_country"
+GLOBAL_SEASONS_KEY = "global_seasons"  # lista di stagioni selezionate (stringhe)
+
+def get_global_filters():
+    return (
+        st.session_state.get(GLOBAL_CHAMP_KEY),
+        st.session_state.get(GLOBAL_SEASONS_KEY),
+    )
+
+def apply_global_filters(df: pd.DataFrame) -> pd.DataFrame:
+    champ, seasons = get_global_filters()
+    out = df.copy()
+    if champ and "country" in out.columns:
+        out = out[out["country"].astype(str) == str(champ)]
+    if seasons and "Stagione" in out.columns:
+        out = out[out["Stagione"].astype(str).isin([str(s) for s in seasons])]
+    return out
+
+def selection_badges():
+    champ, seasons = get_global_filters()
+    txt_champ = f"🏆 <b>{champ}</b>" if champ else "🏷️ nessun campionato selezionato"
+    txt_seas  = ", ".join([str(s) for s in seasons]) if seasons else "tutte le stagioni"
+    st.markdown(
+        f"<div style='margin:.25rem 0 .75rem 0;display:flex;gap:.5rem;flex-wrap:wrap'>"
+        f"<span style='border:1px solid #e5e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>"
+        f"{txt_champ}</span>"
+        f"<span style='border:1px solid #e5e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>"
+        f"🗓️ <b>Stagioni:</b> {txt_seas}</span>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
 # -------------------------------------------------------
 # CONFIG PAGINA
 # -------------------------------------------------------
@@ -135,7 +161,7 @@ st.set_page_config(page_title="ProTrader — Hub", page_icon="⚽", layout="wide
 st.sidebar.title("⚽ ProTrader — Hub")
 
 # -------------------------------------------------------
-# ORIGINE DATI
+# ORIGINE DATI (solo qui nel sidebar)
 # -------------------------------------------------------
 origine_dati = st.sidebar.radio("Origine dati", ["Supabase", "Upload Manuale"], key="origine_dati")
 if origine_dati == "Supabase":
@@ -144,10 +170,9 @@ else:
     df, db_selected = load_data_from_file()
 
 # -------------------------------------------------------
-# MAPPING COLONNE E PULIZIA (esteso)
+# MAPPING COLONNE E PULIZIA (esteso, come richiesto)
 # -------------------------------------------------------
 col_map = {
-    # anagrafiche/contesto
     "country": "country",
     "sezonul": "Stagione",
     "datameci": "Data",
@@ -155,24 +180,17 @@ col_map = {
     "etapa": "Round",
     "txtechipa1": "Home",
     "txtechipa2": "Away",
-
-    # punteggi
     "scor1": "Home Goal FT",
     "scor2": "Away Goal FT",
     "scorp1": "Home Goal 1T",
     "scorp2": "Away Goal 1T",
-
-    # posizioni classifica
     "place1":  "Posizione Classifica Generale",
     "place1a": "Posizione Classifica Home",
     "place2":  "Posizione Classifica Away Generale",
     "place2d": "Posizione classifica away",
-
-    # odds principali
     "cotaa":  "Odd home",
     "cotad":  "Odd Away",
     "cotae":  "Odd Draw",
-    # over/under
     "cotao0": "Odd Over 0.5",
     "cotao1": "Odd Over 1.5",
     "cotao":  "Odd Over 2.5",
@@ -183,18 +201,12 @@ col_map = {
     "cotau":  "Odd Under 2.5",
     "cotau3": "Odd Under 3.5",
     "cotau4": "Odd Under 4.5",
-
-    # btts
     "gg": "GG",
     "ng": "NG",
-
-    # ELO / forma
     "elohomeo": "ELO Home",
     "eloawayo": "ELO Away",
     "formah": "Form Home",
     "formaa": "Form Away",
-
-    # tiri totali e nello specchio
     "suth":  "Tiri Totali Home FT",
     "suth1": "Tiri Home 1T",
     "suth2": "Tiri Home 2T",
@@ -207,8 +219,6 @@ col_map = {
     "sutat":  "Tiri in Porta Away FT",
     "sutat1": "Tiri in Porta Away 1T",
     "sutat2": "Tiri in Porta Away 2T",
-
-    # minuti goal — home (serie gh1..gh9) / away (ga1..ga9)
     "mgolh": "Minuti Goal Home",
     "gh1": "Home Goal 1 (min)",
     "gh2": "Home Goal 2 (min)",
@@ -229,15 +239,11 @@ col_map = {
     "ga7": "Away Goal 7 (min)",
     "ga8": "Away Goal 8 (min)",
     "ga9": "Away Goal 9 (min)",
-
-    # altri
     "stare": "Stare",
     "codechipa1": "CodeChipa1",
     "codechipa2": "CodeChipa2",
 }
 df = df.rename(columns=col_map)
-
-# normalizzazione nomi colonne (spazi/CR/LF)
 df.columns = (
     df.columns.astype(str)
       .str.strip()
@@ -245,68 +251,24 @@ df.columns = (
       .str.replace(r"\s+", " ", regex=True)
 )
 
-# etichetta "Label" (se manca) usando odds principali
+# Etichetta Label se manca
 if "Label" not in df.columns:
     if {"Odd home", "Odd Away"}.issubset(df.columns):
         df["Label"] = df.apply(label_match, axis=1)
     else:
         df["Label"] = "Others"
 
-# ricostruzione dei campi "minuti goal segnato ..." se non presenti
+# Ricostruzione minuti goal se non presenti
 if "minuti goal segnato home" not in df.columns:
-    if set([f"gh{i}" for i in range(1,10)]).issubset({c.lower(): c for c in df.columns.str.lower()}):
+    if set([f"gh{i}" for i in range(1,10)]).issubset(set(c.lower() for c in df.columns)):
         df["minuti goal segnato home"] = df.apply(lambda r: _concat_minutes(r, ["gh"]), axis=1)
 if "minuti goal segnato away" not in df.columns:
-    if set([f"ga{i}" for i in range(1,10)]).issubset({c.lower(): c for c in df.columns.str.lower()}):
+    if set([f"ga{i}" for i in range(1,10)]).issubset(set(c.lower() for c in df.columns)):
         df["minuti goal segnato away"] = df.apply(lambda r: _concat_minutes(r, ["ga"]), axis=1)
 
-# tipi utili
 for c in ["Home Goal FT","Away Goal FT","Home Goal 1T","Away Goal 1T"]:
     if c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-
-# -------------------------------------------------------
-# FILTRO STAGIONI (preset + personalizza) — ordinamento robusto
-# -------------------------------------------------------
-if "Stagione" in df.columns:
-    stag_raw = df["Stagione"].dropna().astype(str).unique().tolist()
-    stagioni_disponibili = sorted(stag_raw, key=_season_sort_key, reverse=True)
-
-    opzione_range = st.sidebar.selectbox(
-        "Intervallo stagioni",
-        ["Tutte", "Ultime 3", "Ultime 5", "Ultime 10", "Personalizza"],
-        key="selettore_range_stagioni",
-    )
-    if opzione_range == "Tutte":
-        stagioni_scelte = stagioni_disponibili
-    elif opzione_range == "Ultime 3":
-        stagioni_scelte = stagioni_disponibili[:3]
-    elif opzione_range == "Ultime 5":
-        stagioni_scelte = stagioni_disponibili[:5]
-    elif opzione_range == "Ultime 10":
-        stagioni_scelte = stagioni_disponibili[:10]
-    else:
-        stagioni_scelte = st.sidebar.multiselect(
-            "Scegli stagioni",
-            options=stagioni_disponibili,
-            default=stagioni_disponibili[:5],
-            key="multiselect_stagioni_personalizzate",
-        )
-    if stagioni_scelte:
-        df = df[df["Stagione"].astype(str).isin(stagioni_scelte)]
-
-# -------------------------------------------------------
-# GUARD-RAIL
-# -------------------------------------------------------
-with st.expander("✅ Colonne presenti", expanded=False):
-    st.write(list(df.columns))
-
-if df.empty:
-    st.error("⚠️ Nessun dato disponibile dopo i filtri applicati.")
-    st.stop()
-if "Home" not in df.columns or "Away" not in df.columns:
-    st.error("⚠️ Colonne 'Home' e/o 'Away' mancanti nel dataset selezionato.")
-    st.stop()
 
 # rimuovi partite future se presente 'Data'
 if "Data" in df.columns:
@@ -315,18 +277,18 @@ if "Data" in df.columns:
     df = df[(df["Data"].isna()) | (df["Data"] <= today)]
 
 # -------------------------------------------------------
-# KPI rapidi
+# KPI rapidi (sul dataset corrente o filtrato se già scelto)
 # -------------------------------------------------------
+df_for_kpi = apply_global_filters(df)
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Partite DB", f"{len(df):,}")
-if "country" in df.columns: c2.metric("Campionati", df["country"].nunique())
-if "Home" in df.columns: c3.metric("Squadre", pd.concat([df["Home"], df["Away"]]).nunique())
-if "Stagione" in df.columns: c4.metric("Stagioni", df["Stagione"].nunique())
-
-st.caption(f"Campionato selezionato: **{db_selected}**")
+c1.metric("Partite DB", f"{len(df_for_kpi):,}")
+if "country" in df_for_kpi.columns: c2.metric("Campionati", df_for_kpi["country"].nunique())
+if "Home" in df_for_kpi.columns: c3.metric("Squadre", pd.concat([df_for_kpi["Home"], df_for_kpi["Away"]]).nunique())
+if "Stagione" in df_for_kpi.columns: c4.metric("Stagioni", df_for_kpi["Stagione"].nunique())
+st.caption(f"Origine: **{db_selected}**")
 
 # -------------------------------------------------------
-# MENU: Hub snello + toggle legacy
+# MENU: Hub + toggle legacy
 # -------------------------------------------------------
 st.sidebar.markdown("---")
 show_legacy = st.sidebar.checkbox("Mostra strumenti avanzati (legacy)")
@@ -350,26 +312,98 @@ menu_option = st.sidebar.radio(
 )
 
 # -------------------------------------------------------
-# ROUTING
+# UI di selezione (SOLO in Pre-Match) + routing
 # -------------------------------------------------------
+def prematch_global_selector(df_base: pd.DataFrame):
+    st.subheader("🎯 Selezione globale — Campionato & Stagioni")
+
+    # Campionati disponibili
+    champs = sorted(df_base["country"].dropna().astype(str).unique()) if "country" in df_base.columns else []
+    sel_champ = st.selectbox(
+        "Campionato",
+        options=champs,
+        index=(champs.index(st.session_state.get(GLOBAL_CHAMP_KEY)) if st.session_state.get(GLOBAL_CHAMP_KEY) in champs else 0) if champs else 0,
+        help="Questo campionato verrà applicato a TUTTE le sezioni (Live, Giorno, Reverse)."
+    ) if champs else None
+
+    # Stagioni disponibili (filtrate sul campionato selezionato, se presente)
+    df_tmp = df_base.copy()
+    if sel_champ and "country" in df_tmp.columns:
+        df_tmp = df_tmp[df_tmp["country"].astype(str) == str(sel_champ)]
+    seasons_all = []
+    if "Stagione" in df_tmp.columns:
+        seasons_all = sorted(df_tmp["Stagione"].dropna().astype(str).unique(), key=_season_sort_key, reverse=True)
+
+    mode = st.radio(
+        "Intervallo stagioni",
+        ["Tutte", "Ultime 3", "Ultime 5", "Ultime 10", "Personalizza"],
+        horizontal=True
+    ) if seasons_all else "Tutte"
+
+    if seasons_all:
+        if mode == "Tutte":
+            sel_seasons = seasons_all
+        elif mode == "Ultime 3":
+            sel_seasons = seasons_all[:3]
+        elif mode == "Ultime 5":
+            sel_seasons = seasons_all[:5]
+        elif mode == "Ultime 10":
+            sel_seasons = seasons_all[:10]
+        else:
+            sel_seasons = st.multiselect(
+                "Seleziona stagioni",
+                options=seasons_all,
+                default=st.session_state.get(GLOBAL_SEASONS_KEY, seasons_all[:5])
+            )
+    else:
+        sel_seasons = None
+
+    # Salva in sessione
+    st.session_state[GLOBAL_CHAMP_KEY] = sel_champ
+    st.session_state[GLOBAL_SEASONS_KEY] = sel_seasons
+
+    # Badge di conferma
+    selection_badges()
+
+    # DataFrame filtrato per passarlo al Pre-Match
+    return apply_global_filters(df_base)
+
+# —— ROUTING ——
 if menu_option == "Pre-Match (Hub)":
-    run_pre_match(df, db_selected)
+    # Selezione globale integrata nella pagina principale
+    df_for_prematch = prematch_global_selector(df)
+    run_pre_match(df_for_prematch, db_selected)
 
 elif menu_option == "Analisi Live da Minuto":
-    run_live_minuto_analysis(df)
+    champ, seasons = get_global_filters()
+    if not champ:
+        st.warning("Seleziona prima il **Campionato** in *Pre-Match (Hub)*.")
+    selection_badges()
+    run_live_minuto_analysis(apply_global_filters(df))
 
 elif menu_option == "Partite del Giorno":
-    run_partite_del_giorno(df, db_selected)
+    champ, seasons = get_global_filters()
+    if not champ:
+        st.warning("Seleziona prima il **Campionato** in *Pre-Match (Hub)*.")
+    selection_badges()
+    run_partite_del_giorno(apply_global_filters(df), db_selected)
 
 elif menu_option == "🧠 Reverse Engineering EV+":
-    run_reverse_engineering(df)
+    champ, seasons = get_global_filters()
+    if not champ:
+        st.warning("Seleziona prima il **Campionato** in *Pre-Match (Hub)*.")
+    selection_badges()
+    run_reverse_engineering(apply_global_filters(df))
 
-# Legacy opzionali
+# Legacy opzionali (usano gli stessi filtri globali)
 elif menu_option == "Macro Stats per Campionato" and LEGACY_OK:
-    run_macro_stats(df, db_selected)
+    selection_badges()
+    run_macro_stats(apply_global_filters(df), db_selected)
 
 elif menu_option == "Statistiche per Squadre" and LEGACY_OK:
-    run_team_stats(df, db_selected)
+    selection_badges()
+    run_team_stats(apply_global_filters(df), db_selected)
 
 elif menu_option == "Correct Score EV" and LEGACY_OK:
-    run_correct_score_ev(df, db_selected)
+    selection_badges()
+    run_correct_score_ev(apply_global_filters(df), db_selected)
