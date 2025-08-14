@@ -1,4 +1,4 @@
-# app.py — ProTrader Hub (Campionato & Stagioni scelti in Pre-Match, fix live fn name)
+# app.py — ProTrader Hub (Selezione globale con FORM + niente rerun su ogni input)
 from __future__ import annotations
 
 import os
@@ -47,12 +47,13 @@ def get_callable(mod, *names, label: str = ""):
 # -------------------------------------------------------
 # utils.py come "utils"
 # -------------------------------------------------------
-_utils = load_local_module("app_utils", "utils.py")
-sys.modules["utils"] = _utils
+_app_utils = load_local_module("app_utils", "utils.py")
+# Esponi come "utils" per compatibilità con altri moduli
+sys.modules["utils"] = _app_utils
 
-load_data_from_supabase = getattr(_utils, "load_data_from_supabase")
-load_data_from_file     = getattr(_utils, "load_data_from_file")
-label_match             = getattr(_utils, "label_match")
+load_data_from_supabase = getattr(_app_utils, "load_data_from_supabase")
+load_data_from_file     = getattr(_app_utils, "load_data_from_file")
+label_match             = getattr(_app_utils, "label_match")
 
 # -------------------------------------------------------
 # Moduli principali
@@ -64,7 +65,7 @@ _reverse_engineering  = load_local_module("reverse_engineering", "reverse_engine
 
 run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
 
-# ✅ FIX: includo sia run_live_minuto_analysis che run_live_minute_analysis
+# ✅ includo sia run_live_minuto_analysis che run_live_minute_analysis (fallback)
 run_live_minuto_analysis = get_callable(
     _analisi_live_minuto,
     "run_live_minuto_analysis", "run_live_minute_analysis",
@@ -72,8 +73,8 @@ run_live_minuto_analysis = get_callable(
     label="analisi_live_minuto",
 )
 
-run_partite_del_giorno   = get_callable(_partite_del_giorno, "run_partite_del_giorno", label="partite_del_giorno")
-run_reverse_engineering  = get_callable(_reverse_engineering, "run_reverse_engineering", label="reverse_engineering")
+run_partite_del_giorno  = get_callable(_partite_del_giorno, "run_partite_del_giorno", label="partite_del_giorno")
+run_reverse_engineering = get_callable(_reverse_engineering, "run_reverse_engineering", label="reverse_engineering")
 
 # -------------------------------------------------------
 # Legacy opzionali dietro toggle
@@ -114,17 +115,19 @@ def _concat_minutes(row: pd.Series, prefixes: list[str]) -> str:
     for p in prefixes:
         for i in range(1, 10):
             c = f"{p}{i}"
-            if c in row and pd.notna(row[c]) and str(row[c]).strip() not in ("", "nan", "None"):
-                try:
-                    v = int(float(str(row[c]).replace(",", ".")))
-                    if v > 0:
-                        mins.append(v)
-                except Exception:
-                    continue
+            # supporta sia colonne lowercase che miste
+            for col in (c, c.upper(), c.capitalize()):
+                if col in row and pd.notna(row[col]) and str(row[col]).strip() not in ("", "nan", "None"):
+                    try:
+                        v = int(float(str(row[col]).replace(",", ".")))
+                        if v > 0:
+                            mins.append(v)
+                    except Exception:
+                        continue
     mins.sort()
     return ",".join(str(m) for m in mins)
 
-# —— FILTRI GLOBALI (scelti in Pre-Match) ——
+# —— FILTRI GLOBALI (selezionati nell'Hub Pre-Match) ——
 GLOBAL_CHAMP_KEY   = "global_country"
 GLOBAL_SEASONS_KEY = "global_seasons"
 
@@ -263,23 +266,29 @@ df.columns = (
       .str.replace(r"\s+", " ", regex=True)
 )
 
+# Etichette (una sola volta se possibile)
 if "Label" not in df.columns:
     if {"Odd home", "Odd Away"}.issubset(df.columns):
         df["Label"] = df.apply(label_match, axis=1)
     else:
         df["Label"] = "Others"
 
-if "minuti goal segnato home" not in df.columns:
-    if set([f"gh{i}" for i in range(1,10)]).issubset(set(c.lower() for c in df.columns)):
-        df["minuti goal segnato home"] = df.apply(lambda r: _concat_minutes(r, ["gh"]), axis=1)
-if "minuti goal segnato away" not in df.columns:
-    if set([f"ga{i}" for i in range(1,10)]).issubset(set(c.lower() for c in df.columns)):
-        df["minuti goal segnato away"] = df.apply(lambda r: _concat_minutes(r, ["ga"]), axis=1)
+# Normalizza colonne minuti-gol se abbiamo gh*/ga* a disposizione
+# (utile per moduli che usano i minuti post-live)
+lower_cols = {c.lower(): c for c in df.columns}
+has_all_gh = all(f"gh{i}" in lower_cols for i in range(1, 10))
+has_all_ga = all(f"ga{i}" in lower_cols for i in range(1, 10))
+if "minuti goal segnato home" not in df.columns and has_all_gh:
+    df["minuti goal segnato home"] = df.apply(lambda r: _concat_minutes(r, ["gh"]), axis=1)
+if "minuti goal segnato away" not in df.columns and has_all_ga:
+    df["minuti goal segnato away"] = df.apply(lambda r: _concat_minutes(r, ["ga"]), axis=1)
 
+# Cast numerici basilari
 for c in ["Home Goal FT","Away Goal FT","Home Goal 1T","Away Goal 1T"]:
     if c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
+# Limita lo storico a oggi (per KPI puliti) se c'è la colonna Data
 if "Data" in df.columns:
     df["Data"] = _safe_to_datetime(df["Data"])
     today = pd.Timestamp.today().normalize()
@@ -288,17 +297,6 @@ if "Data" in df.columns:
 # -------------------------------------------------------
 # KPI rapidi (sul dataset filtrato se già scelto)
 # -------------------------------------------------------
-def _short_origin_label(s: str) -> str:
-    if not s:
-        return ""
-    sl = s.lower()
-    if sl.startswith("supabase"):
-        return "Supabase"
-    for sep in ("/", "\\"):
-        if sep in s:
-            s = s.split(sep)[-1]
-    return s[:60]
-
 df_for_kpi = apply_global_filters(df)
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Partite DB", f"{len(df_for_kpi):,}")
@@ -336,53 +334,77 @@ menu_option = st.sidebar.radio(
 
 # -------------------------------------------------------
 # UI Selezione Globale (SOLO in Pre-Match) + routing
+# -> Implementata con FORM per evitare rerun ad ogni cambio
 # -------------------------------------------------------
 def prematch_global_selector(df_base: pd.DataFrame):
     st.subheader("🎯 Selezione globale — Campionato & Stagioni")
 
+    # Valori correnti effettivi (se già scelti in passato)
+    cur_champ, cur_seasons = get_global_filters()
+
+    # Calcola opzioni disponibili (dinamiche, in base ai dati caricati)
     champs = sorted(df_base["country"].dropna().astype(str).unique()) if "country" in df_base.columns else []
-    sel_champ = st.selectbox(
-        "Campionato",
-        options=champs,
-        index=(champs.index(st.session_state.get(GLOBAL_CHAMP_KEY)) if st.session_state.get(GLOBAL_CHAMP_KEY) in champs else 0) if champs else 0,
-        help="Questo campionato verrà applicato a TUTTE le sezioni (Live, Giorno, Reverse)."
-    ) if champs else None
+    # Default iniziale se non c'è nulla in sessione
+    if cur_champ is None and champs:
+        st.session_state[GLOBAL_CHAMP_KEY] = champs[0]
+        cur_champ = champs[0]
 
     df_tmp = df_base.copy()
-    if sel_champ and "country" in df_tmp.columns:
-        df_tmp = df_tmp[df_tmp["country"].astype(str) == str(sel_champ)]
+    if cur_champ and "country" in df_tmp.columns:
+        df_tmp = df_tmp[df_tmp["country"].astype(str) == str(cur_champ)]
+
     seasons_all = []
     if "Stagione" in df_tmp.columns:
-        seasons_all = sorted(df_tmp["Stagione"].dropna().astype(str).unique(), key=_season_sort_key, reverse=True)
+        seasons_all = sorted(df_tmp["Stagione"].dropna().astype(str).unique(),
+                             key=_season_sort_key, reverse=True)
+        if cur_seasons is None:
+            # default “Tutte”
+            st.session_state[GLOBAL_SEASONS_KEY] = seasons_all
+            cur_seasons = seasons_all
 
-    mode = st.radio(
-        "Intervallo stagioni",
-        ["Tutte", "Ultime 3", "Ultime 5", "Ultime 10", "Personalizza"],
-        horizontal=True
-    ) if seasons_all else "Tutte"
+    # ---- FORM: nessun rerun finché non premi "Applica" ----
+    with st.form("global_selection_form", clear_on_submit=False):
+        colA, colB = st.columns([1.2, 1])
 
-    if seasons_all:
-        if mode == "Tutte":
-            sel_seasons = seasons_all
-        elif mode == "Ultime 3":
-            sel_seasons = seasons_all[:3]
-        elif mode == "Ultime 5":
-            sel_seasons = seasons_all[:5]
-        elif mode == "Ultime 10":
-            sel_seasons = seasons_all[:10]
-        else:
-            sel_seasons = st.multiselect(
-                "Seleziona stagioni",
-                options=seasons_all,
-                default=st.session_state.get(GLOBAL_SEASONS_KEY, seasons_all[:5])
-            )
-    else:
-        sel_seasons = None
+        with colA:
+            sel_champ = st.selectbox(
+                "🏆 Campionato",
+                options=champs,
+                index=(champs.index(cur_champ) if cur_champ in champs else 0) if champs else 0,
+                help="Questa scelta è globale (si applica a Live, Partite del Giorno, Reverse, ecc.)."
+            ) if champs else None
 
-    st.session_state[GLOBAL_CHAMP_KEY] = sel_champ
-    st.session_state[GLOBAL_SEASONS_KEY] = sel_seasons
+        with colB:
+            mode = st.radio("Intervallo stagioni", ["Tutte", "Ultime 3", "Ultime 5", "Ultime 10", "Personalizza"],
+                            horizontal=True) if seasons_all else "Tutte"
+
+        sel_seasons = cur_seasons
+        if seasons_all:
+            if mode == "Tutte":
+                sel_seasons = seasons_all
+            elif mode == "Ultime 3":
+                sel_seasons = seasons_all[:3]
+            elif mode == "Ultime 5":
+                sel_seasons = seasons_all[:5]
+            elif mode == "Ultime 10":
+                sel_seasons = seasons_all[:10]
+            else:
+                sel_seasons = st.multiselect(
+                    "Seleziona stagioni",
+                    options=seasons_all,
+                    default=cur_seasons if cur_seasons else seasons_all[:5]
+                )
+
+        submitted = st.form_submit_button("✅ Applica selezione")
+
+    # Commit SOLO quando si preme "Applica"
+    if submitted:
+        if sel_champ is not None:
+            st.session_state[GLOBAL_CHAMP_KEY] = sel_champ
+        st.session_state[GLOBAL_SEASONS_KEY] = sel_seasons
 
     selection_badges()
+    # Ritorna df filtrato su valori EFFETTIVI (da sessione, non dai widget provvisori)
     return apply_global_filters(df_base)
 
 def _db_label_for_modules() -> str:
