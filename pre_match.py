@@ -92,8 +92,16 @@ def _coerce_float(s: pd.Series) -> pd.Series:
         return pd.Series(dtype="float")
     return pd.to_numeric(_ensure_str(s).str.replace(",", ".", regex=False), errors="coerce")
 
-def _first_present(cols: list[str], columns: pd.Index) -> str | None:
-    for c in cols:
+def _first_present(cols, columns: pd.Index) -> str | None:
+    """Ritorna il primo nome colonna presente in `columns`.
+    Accetta anche None o oggetti non iterabili senza esplodere."""
+    if not cols:
+        return None
+    try:
+        iterable = list(cols)
+    except Exception:
+        return None
+    for c in iterable:
         if c in columns:
             return c
     return None
@@ -316,20 +324,24 @@ def _calc_back_lay_1x2_cached(df_light: pd.DataFrame, commission: float = 0.0):
 # ==========================
 # ROI Over/Under/BTTS + cache
 # ==========================
-def _calc_market_roi(df: pd.DataFrame, market: str, price_cols: list[str],
+def _calc_market_roi(df: pd.DataFrame, market: str, price_cols,   # <- accetta qualunque cosa
                      line: float | None, commission: float, manual_price: float | None = None):
     df = df.dropna(subset=["Home Goal FT", "Away Goal FT"])
     if df.empty:
         return {"Mercato": market, "Quota Media": np.nan, "Esiti %": "0.0%",
                 "ROI Back %": "0.0%", "ROI Lay %": "0.0%", "Match Analizzati": 0}
 
+    # 🛡️ robustezza: se price_cols è None o non iterabile, nessuna colonna di prezzo
     col = _first_present(price_cols, df.columns)
     odds = _coerce_float(df[col]) if col else pd.Series([np.nan] * len(df), index=df.index)
+
+    # se non ho odds valide, uso la manuale (se c'è); altrimenti rimangono NaN e più sotto verranno saltate
     if manual_price and (odds.isna() | (odds < 1.01)).all():
         odds = pd.Series([manual_price] * len(df), index=df.index)
     else:
         if manual_price is not None:
             odds = odds.where(odds >= 1.01, manual_price)
+
 
     hits = 0; back_profit = 0.0; lay_profit = 0.0; total = 0
     qsum = 0.0; qcount = 0
