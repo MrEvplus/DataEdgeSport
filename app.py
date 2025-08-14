@@ -1,4 +1,4 @@
-# app.py — ProTrader Hub (Selezione globale in SIDEBAR con FORM + niente rerun su ogni input)
+# app.py — ProTrader Hub (Selezione globale in SIDEBAR con FORM + intervalli stagioni smart)
 from __future__ import annotations
 
 import os
@@ -115,7 +115,6 @@ def _concat_minutes(row: pd.Series, prefixes: list[str]) -> str:
     for p in prefixes:
         for i in range(1, 10):
             c = f"{p}{i}"
-            # supporta sia colonne lowercase che miste
             for col in (c, c.upper(), c.capitalize()):
                 if col in row and pd.notna(row[col]) and str(row[col]).strip() not in ("", "nan", "None"):
                     try:
@@ -168,6 +167,86 @@ def _short_origin_label(s: str) -> str:
         if sep in s:
             s = s.split(sep)[-1]
     return s[:60]
+
+# -------------------------------------------------------
+# ✨ NUOVI HELPER: stagione corrente & intervalli per anni
+# -------------------------------------------------------
+import datetime as _dt
+
+def _parse_season_start_year(season_str: str) -> int | None:
+    """
+    Ritorna l'anno di inizio stagione (YYYY) per stringhe tipo:
+    '2024-25', '2024/2025', '2024-2025', '23/24', '2024', ecc.
+    """
+    if season_str is None:
+        return None
+    s = str(season_str)
+    nums = re.findall(r"\d{2,4}", s)
+    if not nums:
+        return None
+    first = nums[0]
+    if len(first) == 4:
+        return int(first)
+    if len(first) == 2:
+        yy = int(first)
+        return 2000 + yy if yy <= 50 else 1900 + yy
+    return None
+
+def _current_season_start_year(tz: str = "Europe/Rome") -> int:
+    # Regola: stagione calcistica inizia a luglio (7). Se mese >= 7 → stagione in corso = anno corrente.
+    now = pd.Timestamp.now(tz=tz)
+    return int(now.year if now.month >= 7 else now.year - 1)
+
+def _seasons_desc_for_champ(df_champ: pd.DataFrame) -> list[str]:
+    """Restituisce le stagioni presenti nel dataset (colonna 'Stagione') ordinate per start-year decrescente."""
+    if "Stagione" not in df_champ.columns:
+        return []
+    uniq = [str(x) for x in df_champ["Stagione"].dropna().unique()]
+    uniq = list(set(uniq))
+    uniq.sort(key=lambda s: (_parse_season_start_year(s) or -1, s), reverse=True)
+    return uniq
+
+def _map_startyear_to_seasons(seasons_list: list[str]) -> dict[int, list[str]]:
+    m: dict[int, list[str]] = {}
+    for s in seasons_list:
+        y = _parse_season_start_year(s)
+        if y is None:
+            continue
+        m.setdefault(y, []).append(s)
+    # ordina ogni lista per estetica (decrescente al solito)
+    for y in m:
+        m[y].sort(key=lambda s: (_parse_season_start_year(s) or -1, s), reverse=True)
+    return m
+
+def _select_seasons_by_mode(seasons_list: list[str], mode: str) -> list[str]:
+    """
+    Costruisce la selezione stagioni (stringhe esistenti nel dataset) in base alla modalità:
+    - 'Stagione Corrente' → solo la stagione con start-year corrente (se presente)
+    - 'Ultime 3/5/10' → start-year: [cur, cur-1, ...], includendo tutte le stringhe dataset che matchano questi anni
+    - 'Personalizza' → verrà gestito con multiselect (qui non usato)
+    """
+    if not seasons_list:
+        return []
+    cur = _current_season_start_year()
+    m = _map_startyear_to_seasons(seasons_list)
+
+    def take_last(n: int) -> list[str]:
+        years = [cur - i for i in range(n)]
+        out = []
+        # decrescente: aggiungo per cur, cur-1, ...
+        for y in years:
+            out.extend(m.get(y, []))
+        return out
+
+    if mode == "Stagione Corrente":
+        return m.get(cur, [])
+    if mode == "Ultime 3":
+        return take_last(3)
+    if mode == "Ultime 5":
+        return take_last(5)
+    if mode == "Ultime 10":
+        return take_last(10)
+    return []  # Personalizza sarà gestito a parte
 
 # -------------------------------------------------------
 # CONFIG PAGINA
@@ -306,18 +385,11 @@ if cur_champ is None and champs:
     st.session_state[GLOBAL_CHAMP_KEY] = champs[0]
     cur_champ = champs[0]
 
-# La lista stagioni dipende dal campionato correntemente applicato
+# La lista stagioni dipende dal campionato correntemente applicato (valore attuale in sessione)
 df_tmp = df.copy()
 if cur_champ and "country" in df_tmp.columns:
     df_tmp = df_tmp[df_tmp["country"].astype(str) == str(cur_champ)]
-
-seasons_all = []
-if "Stagione" in df_tmp.columns:
-    seasons_all = sorted(df_tmp["Stagione"].dropna().astype(str).unique(),
-                         key=_season_sort_key, reverse=True)
-    if cur_seasons is None:
-        st.session_state[GLOBAL_SEASONS_KEY] = seasons_all
-        cur_seasons = seasons_all
+seasons_all_desc = _seasons_desc_for_champ(df_tmp)  # ordinamento decrescente per start-year
 
 with st.sidebar.form("global_selection_form_sidebar", clear_on_submit=False):
     sel_champ = st.selectbox(
@@ -327,37 +399,32 @@ with st.sidebar.form("global_selection_form_sidebar", clear_on_submit=False):
         help="La selezione è globale (si applica a tutte le sezioni)."
     ) if champs else None
 
-    mode = "Tutte"
-    if seasons_all:
-        mode = st.radio(
-            "Intervallo stagioni",
-            ["Tutte", "Ultime 3", "Ultime 5", "Ultime 10", "Personalizza"],
-            horizontal=True
-        )
+    # Nuove modalità intervallo
+    modes = ["Stagione Corrente", "Ultime 3", "Ultime 5", "Ultime 10", "Personalizza"]
+    mode_idx_default = 0
+    if seasons_all_desc:
+        # Se in sessione hai già una selezione, non forziamo una radio coerente: usiamo default 0
+        pass
+    mode = st.radio("Intervallo stagioni", modes, horizontal=True, index=mode_idx_default)
 
     sel_seasons = cur_seasons
-    if seasons_all:
-        if mode == "Tutte":
-            sel_seasons = seasons_all
-        elif mode == "Ultime 3":
-            sel_seasons = seasons_all[:3]
-        elif mode == "Ultime 5":
-            sel_seasons = seasons_all[:5]
-        elif mode == "Ultime 10":
-            sel_seasons = seasons_all[:10]
-        else:
-            sel_seasons = st.multiselect(
-                "Seleziona stagioni",
-                options=seasons_all,
-                default=cur_seasons if cur_seasons else seasons_all[:5]
-            )
+
+    if mode == "Personalizza":
+        # Personalizza: multiselezione delle stagioni presenti (sempre decrescenti)
+        sel_seasons = st.multiselect(
+            "Seleziona stagioni (più recente in alto)",
+            options=seasons_all_desc,
+            default=cur_seasons if cur_seasons else seasons_all_desc[:5]
+        )
+    else:
+        # Costruzione automatica dalle stagioni dataset usando start-year corrente e intervallo per anni
+        sel_seasons = _select_seasons_by_mode(seasons_all_desc, mode)
 
     applied = st.form_submit_button("✅ Applica")
 
 if applied:
     if sel_champ is not None:
         st.session_state[GLOBAL_CHAMP_KEY] = sel_champ
-        # Nota: la lista stagioni verrà ricalcolata al prossimo rerun in base al nuovo campionato
     st.session_state[GLOBAL_SEASONS_KEY] = sel_seasons
 
 # -------------------------------------------------------
@@ -404,10 +471,10 @@ menu_option = st.sidebar.radio(
 def selection_badges():
     champ, seasons = get_global_filters()
     txt_champ = f"🏆 <b>{champ}</b>" if champ else "🏷️ nessun campionato selezionato"
-    txt_seas  = ", ".join([str(s) for s in seasons]) if seasons else "tutte le stagioni"
+    txt_seas  = ", ".join([str(s) for s in seasons]) if seasons else "—"
     st.markdown(
         f"<div style='margin:.25rem 0 .75rem 0;display:flex;gap:.5rem;flex-wrap:wrap'>"
-        f"<span style='border:1px solid #e57e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>{txt_champ}</span>"
+        f"<span style='border:1px solid #e5e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>{txt_champ}</span>"
         f"<span style='border:1px solid #e5e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>🗓️ <b>Stagioni:</b> {txt_seas}</span>"
         f"</div>",
         unsafe_allow_html=True
@@ -424,7 +491,6 @@ def _db_label_for_modules() -> str:
 # -------------------------------------------------------
 if menu_option == "Pre-Match (Hub)":
     selection_badges()
-    # Ora la selezione è in sidebar: passiamo semplicemente il df filtrato
     run_pre_match(apply_global_filters(df), _db_label_for_modules())
 
 elif menu_option == "Analisi Live da Minuto":
