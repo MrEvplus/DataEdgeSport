@@ -1,4 +1,4 @@
-# app.py — ProTrader Hub (campionato & stagioni selezionati in Pre-Match)
+# app.py — ProTrader Hub (Campionato & Stagioni scelti in Pre-Match, fix db_label)
 from __future__ import annotations
 
 import os
@@ -45,7 +45,7 @@ def get_callable(mod, *names, label: str = ""):
     )
 
 # -------------------------------------------------------
-# utils.py come "utils" (per import interni)
+# utils.py come "utils"
 # -------------------------------------------------------
 _utils = load_local_module("app_utils", "utils.py")
 sys.modules["utils"] = _utils
@@ -65,7 +65,7 @@ _reverse_engineering  = load_local_module("reverse_engineering", "reverse_engine
 run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
 run_live_minuto_analysis = get_callable(
     _analisi_live_minuto,
-    "run_live_minute_analysis", "run_live_minuto", "run_live", "main",
+    "run_live_minuto_analysis", "run_live_minuto", "run_live", "main",
     label="analisi_live_minuto",
 )
 run_partite_del_giorno = get_callable(_partite_del_giorno, "run_partite_del_giorno", label="partite_del_giorno")
@@ -95,7 +95,7 @@ def _safe_to_datetime(series: pd.Series) -> pd.Series:
         return pd.to_datetime(series.astype(str), errors="coerce")
 
 def _season_sort_key(x: str) -> int:
-    """Chiave numerica per ordinare stagioni: prende l'ANNO PIÙ RECENTE presente nella stringa."""
+    """Ordina stagioni estraendo l'ANNO PIÙ RECENTE nella stringa (2024-25, 24/25, 2025…)."""
     if x is None:
         return -1
     s = str(x)
@@ -121,9 +121,9 @@ def _concat_minutes(row: pd.Series, prefixes: list[str]) -> str:
     mins.sort()
     return ",".join(str(m) for m in mins)
 
-# —— FILTRI GLOBALI (selezionati in Pre-Match) ——
+# —— FILTRI GLOBALI (scelti in Pre-Match) ——
 GLOBAL_CHAMP_KEY   = "global_country"
-GLOBAL_SEASONS_KEY = "global_seasons"  # lista di stagioni selezionate (stringhe)
+GLOBAL_SEASONS_KEY = "global_seasons"  # lista stagioni scelte
 
 def get_global_filters():
     return (
@@ -154,6 +154,19 @@ def selection_badges():
         unsafe_allow_html=True
     )
 
+def _short_origin_label(s: str) -> str:
+    """Mostra 'Supabase' o il nome file, non l'URL completo."""
+    if not s:
+        return ""
+    sl = s.lower()
+    if sl.startswith("supabase"):
+        return "Supabase"
+    # prova a estrarre nome file
+    for sep in ("/", "\\"):
+        if sep in s:
+            s = s.split(sep)[-1]
+    return s[:60]
+
 # -------------------------------------------------------
 # CONFIG PAGINA
 # -------------------------------------------------------
@@ -161,18 +174,17 @@ st.set_page_config(page_title="ProTrader — Hub", page_icon="⚽", layout="wide
 st.sidebar.title("⚽ ProTrader — Hub")
 
 # -------------------------------------------------------
-# ORIGINE DATI (solo qui nel sidebar)
+# ORIGINE DATI (sidebar minimale)
 # -------------------------------------------------------
-# --- ORIGINE DATI (sidebar) ---
-# app.py (estratto)
 origine_dati = st.sidebar.radio("Origine dati", ["Supabase", "Upload Manuale"], key="origine_dati")
 if origine_dati == "Supabase":
+    # ⬇️ modalità minimal: nessun selettore Campionato/Stagioni nel sidebar
     df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase", ui_mode="minimal")
 else:
     df, db_selected = load_data_from_file(ui_mode="minimal")
 
 # -------------------------------------------------------
-# MAPPING COLONNE E PULIZIA (esteso, come richiesto)
+# MAPPING COLONNE E PULIZIA (esteso)
 # -------------------------------------------------------
 col_map = {
     "country": "country",
@@ -253,14 +265,12 @@ df.columns = (
       .str.replace(r"\s+", " ", regex=True)
 )
 
-# Etichetta Label se manca
 if "Label" not in df.columns:
     if {"Odd home", "Odd Away"}.issubset(df.columns):
         df["Label"] = df.apply(label_match, axis=1)
     else:
         df["Label"] = "Others"
 
-# Ricostruzione minuti goal se non presenti
 if "minuti goal segnato home" not in df.columns:
     if set([f"gh{i}" for i in range(1,10)]).issubset(set(c.lower() for c in df.columns)):
         df["minuti goal segnato home"] = df.apply(lambda r: _concat_minutes(r, ["gh"]), axis=1)
@@ -272,14 +282,13 @@ for c in ["Home Goal FT","Away Goal FT","Home Goal 1T","Away Goal 1T"]:
     if c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
-# rimuovi partite future se presente 'Data'
 if "Data" in df.columns:
     df["Data"] = _safe_to_datetime(df["Data"])
     today = pd.Timestamp.today().normalize()
     df = df[(df["Data"].isna()) | (df["Data"] <= today)]
 
 # -------------------------------------------------------
-# KPI rapidi (sul dataset corrente o filtrato se già scelto)
+# KPI rapidi (sul dataset filtrato se già scelto)
 # -------------------------------------------------------
 df_for_kpi = apply_global_filters(df)
 c1, c2, c3, c4 = st.columns(4)
@@ -287,7 +296,10 @@ c1.metric("Partite DB", f"{len(df_for_kpi):,}")
 if "country" in df_for_kpi.columns: c2.metric("Campionati", df_for_kpi["country"].nunique())
 if "Home" in df_for_kpi.columns: c3.metric("Squadre", pd.concat([df_for_kpi["Home"], df_for_kpi["Away"]]).nunique())
 if "Stagione" in df_for_kpi.columns: c4.metric("Stagioni", df_for_kpi["Stagione"].nunique())
-st.caption(f"Origine: **{db_selected}**")
+
+db_short = _short_origin_label(db_selected)
+if db_short:
+    st.caption(f"Origine: **{db_short}**")
 
 # -------------------------------------------------------
 # MENU: Hub + toggle legacy
@@ -314,12 +326,12 @@ menu_option = st.sidebar.radio(
 )
 
 # -------------------------------------------------------
-# UI di selezione (SOLO in Pre-Match) + routing
+# UI Selezione Globale (SOLO in Pre-Match) + routing
 # -------------------------------------------------------
 def prematch_global_selector(df_base: pd.DataFrame):
     st.subheader("🎯 Selezione globale — Campionato & Stagioni")
 
-    # Campionati disponibili
+    # Campionati
     champs = sorted(df_base["country"].dropna().astype(str).unique()) if "country" in df_base.columns else []
     sel_champ = st.selectbox(
         "Campionato",
@@ -328,7 +340,7 @@ def prematch_global_selector(df_base: pd.DataFrame):
         help="Questo campionato verrà applicato a TUTTE le sezioni (Live, Giorno, Reverse)."
     ) if champs else None
 
-    # Stagioni disponibili (filtrate sul campionato selezionato, se presente)
+    # Stagioni filtrate per campionato
     df_tmp = df_base.copy()
     if sel_champ and "country" in df_tmp.columns:
         df_tmp = df_tmp[df_tmp["country"].astype(str) == str(sel_champ)]
@@ -367,45 +379,51 @@ def prematch_global_selector(df_base: pd.DataFrame):
     # Badge di conferma
     selection_badges()
 
-    # DataFrame filtrato per passarlo al Pre-Match
+    # DataFrame filtrato da passare al Pre-Match
     return apply_global_filters(df_base)
+
+# argomento "nome dataset" da passare ai moduli (usa campionato scelto, NON l'URL)
+def _db_label_for_modules() -> str:
+    champ = st.session_state.get(GLOBAL_CHAMP_KEY)
+    if champ:
+        return str(champ)
+    return _short_origin_label(db_selected) or "Dataset"
 
 # —— ROUTING ——
 if menu_option == "Pre-Match (Hub)":
-    # Selezione globale integrata nella pagina principale
     df_for_prematch = prematch_global_selector(df)
-    run_pre_match(df_for_prematch, db_selected)
+    run_pre_match(df_for_prematch, _db_label_for_modules())
 
 elif menu_option == "Analisi Live da Minuto":
-    champ, seasons = get_global_filters()
+    champ, _ = get_global_filters()
     if not champ:
         st.warning("Seleziona prima il **Campionato** in *Pre-Match (Hub)*.")
     selection_badges()
     run_live_minuto_analysis(apply_global_filters(df))
 
 elif menu_option == "Partite del Giorno":
-    champ, seasons = get_global_filters()
+    champ, _ = get_global_filters()
     if not champ:
         st.warning("Seleziona prima il **Campionato** in *Pre-Match (Hub)*.")
     selection_badges()
-    run_partite_del_giorno(apply_global_filters(df), db_selected)
+    run_partite_del_giorno(apply_global_filters(df), _db_label_for_modules())
 
 elif menu_option == "🧠 Reverse Engineering EV+":
-    champ, seasons = get_global_filters()
+    champ, _ = get_global_filters()
     if not champ:
         st.warning("Seleziona prima il **Campionato** in *Pre-Match (Hub)*.")
     selection_badges()
     run_reverse_engineering(apply_global_filters(df))
 
-# Legacy opzionali (usano gli stessi filtri globali)
+# Legacy opzionali
 elif menu_option == "Macro Stats per Campionato" and LEGACY_OK:
     selection_badges()
-    run_macro_stats(apply_global_filters(df), db_selected)
+    run_macro_stats(apply_global_filters(df), _db_label_for_modules())
 
 elif menu_option == "Statistiche per Squadre" and LEGACY_OK:
     selection_badges()
-    run_team_stats(apply_global_filters(df), db_selected)
+    run_team_stats(apply_global_filters(df), _db_label_for_modules())
 
 elif menu_option == "Correct Score EV" and LEGACY_OK:
     selection_badges()
-    run_correct_score_ev(apply_global_filters(df), db_selected)
+    run_correct_score_ev(apply_global_filters(df), _db_label_for_modules())
