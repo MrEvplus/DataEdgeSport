@@ -1,9 +1,10 @@
-# pre_match.py — versione PRO consolidata e corretta
-# - Fix: formattazioni numeriche corrette (niente più "+.1f" nelle celle)
+# pre_match.py — versione PRO consolidata
 # - Macro KPI Plus con tabelle professionali
-# - ROI/EV con glossari
-# - Filtri stagioni robusti
-# - Calibrazione 1X2 con formati numerici giusti
+# - EV/ROI con glossari e stile
+# - Statistiche Squadre: filtro solo per la sezione (default stagione corrente)
+# - Live: passaggio contesto + badge
+# - Fix robustezza: _first_present, _calc_market_roi
+# - Calibrazione 1X2: chart Altair robusto senza transform_fold
 
 from __future__ import annotations
 
@@ -16,20 +17,30 @@ import altair as alt
 
 # ========= Moduli esterni opzionali =========
 try:
-    from squadre import compute_team_macro_stats, show_goal_patterns  # fallback per tab "Statistiche squadre"
+    from squadre import compute_team_macro_stats, render_team_stats_tab
 except Exception:
-    compute_team_macro_stats = None  # type: ignore
-    show_goal_patterns = None  # type: ignore
+    try:
+        from team_stats import compute_team_macro_stats, render_team_stats_tab  # type: ignore
+    except Exception:
+        compute_team_macro_stats = None  # type: ignore
+        def render_team_stats_tab(*args, **kwargs):
+            st.info("Modulo 'render_team_stats_tab' non disponibile in questo ambiente.")
 
 try:
-    from correct_score_ev_sezione import run_correct_score_ev as run_correct_score_panel  # type: ignore
+    from correct_score import run_correct_score_panel
 except Exception:
-    run_correct_score_panel = None  # type: ignore
+    try:
+        from correct_score_ev_sezione import run_correct_score_ev as run_correct_score_panel  # type: ignore
+    except Exception:
+        run_correct_score_panel = None  # type: ignore
 
 try:
-    from analisi_live_minuto import run_live_minute_analysis as _run_live  # type: ignore
+    from analisi_live_minuto import run_live_minuto_analysis as _run_live
 except Exception:
-    _run_live = None  # type: ignore
+    try:
+        from analisi_live_minuto import run_live_minute_analysis as _run_live  # type: ignore
+    except Exception:
+        _run_live = None  # type: ignore
 
 try:
     from utils import label_match
@@ -47,10 +58,12 @@ except Exception:
             return "A_MediumFav 1.5-2"
         return "Others"
 
+
 # ========= Config HUB =========
 USE_GLOBAL_FILTERS = True
 GLOBAL_CHAMP_KEY   = "global_country"
 GLOBAL_SEASONS_KEY = "global_seasons"   # lista stagioni (HUB)
+
 
 # ========= Altair Theme =========
 def _alt_theme():
@@ -68,6 +81,7 @@ try:
     alt.themes.enable("app_theme")
 except Exception:
     pass
+
 
 # ========= Helper generali =========
 def _k(name: str) -> str:
@@ -140,6 +154,7 @@ def _set_qparams(**kwargs):
     except Exception:
         st.experimental_set_query_params(**qp)
 
+
 # ========= Stagioni helpers =========
 def _season_sort_key(s: str) -> int:
     if not isinstance(s, str):
@@ -172,6 +187,7 @@ def _pick_current_season(seasons_desc: list[str]) -> list[str]:
             return [s]
     return seasons_desc[:1]
 
+
 # ========= Quote condivise (sincronizzate tra tab) =========
 _SHARED_PREFIX = "prematch:shared:"
 
@@ -203,6 +219,7 @@ def _get_shared_quotes() -> dict:
         "btts": float(st.session_state[_shared_key("btts")]),
     }
 
+
 # ========= League data by Label + cache =========
 @st.cache_data(show_spinner=False, ttl=900)
 def _league_data_by_label_cached(df_light: pd.DataFrame, label: str | None) -> dict | None:
@@ -226,6 +243,7 @@ def _league_data_by_label_cached(df_light: pd.DataFrame, label: str | None) -> d
     else:
         row = group
     return row.iloc[0].to_dict() if not row.empty else None
+
 
 # ========= Back/Lay 1x2 + cache =========
 def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
@@ -284,7 +302,8 @@ def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
 def _calc_back_lay_1x2_cached(df_light: pd.DataFrame, commission: float = 0.0):
     return _calc_back_lay_1x2(df_light.copy(), commission)
 
-# ========= ROI Over/BTTS + cache =========
+
+# ========= ROI Over/BTTS + cache (robusto) =========
 def _calc_market_roi(df: pd.DataFrame, market: str, price_cols,
                      line: float | None, commission: float, manual_price: float | None = None):
     df = df.dropna(subset=["Home Goal FT", "Away Goal FT"])
@@ -346,6 +365,7 @@ def _calc_market_roi_cached(df_light: pd.DataFrame, market: str, price_cols: tup
                             line: float | None, commission: float, manual_price: float | None):
     return _calc_market_roi(df_light.copy(), list(price_cols), line, commission, manual_price)
 
+
 # ========= Probabilità storiche per EV =========
 def _market_prob(df: pd.DataFrame, market: str, line: float | None) -> float:
     if df.empty:
@@ -363,6 +383,7 @@ def _quality_label(n: int) -> str:
     if n >= 50: return "ALTO"
     if n >= 20: return "MEDIO"
     return "BASSO"
+
 
 # ========= EV storico – tabella + Best EV =========
 def _build_ev_table(df_home_ctx: pd.DataFrame, df_away_ctx: pd.DataFrame, df_h2h: pd.DataFrame,
@@ -414,6 +435,7 @@ def _build_ev_table_cached(home_ctx_light: pd.DataFrame, away_ctx_light: pd.Data
                            quota_ov15: float, quota_ov25: float, quota_ov35: float, quota_btts: float):
     return _build_ev_table(home_ctx_light.copy(), away_ctx_light.copy(), h2h_light.copy(),
                            squadra_casa, squadra_ospite, quota_ov15, quota_ov25, quota_ov35, quota_btts)
+
 
 # ================================================================
 # ===============  MACRO KPI PLUS (tabelle pro)  =================
@@ -613,6 +635,7 @@ def _df_style_positive_negative(df: pd.DataFrame, pos_good_cols: list[str] = Non
         if c in df.columns: sty = sty.applymap(lambda v: _col(v, "neg"), subset=[c])
     return sty.set_properties(**{"font-size":"12px"})
 
+# ========= Stili/Glossari per EV & ROI =========
 def _style_ev(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     def _col_ev(v):
         try: f = float(v)
@@ -682,11 +705,25 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
 
         dfm = pd.DataFrame([base])
 
+        # --- Stile + FORMATTING numerico con segno e decimali (fix +.1f) ---
         sty = _df_style_positive_negative(
             dfm,
             pos_good_cols=["Δ Win%","Δ GF","Δ ELO","Δ Form"],
             neg_good_cols=["Δ Loss%","Δ GA"]
         )
+        sty = sty.format({
+            "Δ Win%":  "{:+.1f}",
+            "Δ Draw%": "{:+.1f}",
+            "Δ Loss%": "{:+.1f}",
+            "Δ GF":    "{:+.2f}",
+            "Δ GA":    "{:+.2f}",
+            "Δ ELO":   "{:+.1f}",
+            "Δ Form":  "{:+.2f}",
+            "N (ultime)": "{:.0f}",
+            "N (tot)":    "{:.0f}",
+        })
+        # ---------------------------------------------------------------
+
         st.caption(
             f"**{title}** — campione: {base['N (tot)']} • recenti: {base['N (ultime)']} • affidabilità: {base['Affidabilità']}"
         )
@@ -719,7 +756,7 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
         c1, c2 = st.columns(2)
         def _render_fg(df_, title):
             df_ = df_.copy()
-            df_["Freq %"] = pd.to_numeric(df_["Freq %"], errors="coerce").fillna(0.0)
+            df_["Freq %"] = df_["Freq %"].astype(float)
             st.caption(title)
             st.dataframe(
                 df_, use_container_width=True, height=150,
@@ -783,13 +820,6 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
                 if dfc.empty:
                     st.info("Dati insufficienti.")
                 else:
-                    # forza i tipi per sicurezza
-                    for c in ["Implied %", "Observed %", "Gap %", "N", "Brier"]:
-                        if c in dfc.columns:
-                            if c in ("N",):
-                                dfc[c] = pd.to_numeric(dfc[c], errors="coerce").astype("Int64")
-                            else:
-                                dfc[c] = pd.to_numeric(dfc[c], errors="coerce")
                     st.dataframe(
                         dfc, use_container_width=True, height=220,
                         column_config={
@@ -819,6 +849,7 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
         _render_calib("Home", 0)
         _render_calib("Draw", 1)
         _render_calib("Away", 2)
+
 
 # ========= ENTRY POINT =========
 def run_pre_match(df: pd.DataFrame, db_selected: str):
@@ -1274,41 +1305,23 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     # === TAB 4: Statistiche squadre ===
     with tab_stats:
         st.subheader("Statistiche squadre")
-        if show_goal_patterns is None:
-            st.info("Modulo per le statistiche di squadra non disponibile in questo ambiente.")
+        # Filtro stagioni SOLO per questa sezione (default stagione corrente)
+        if "Stagione" in df_league_all.columns:
+            seasons_desc = _seasons_desc(df_league_all["Stagione"].dropna().unique().tolist())
         else:
-            if "Stagione" in df_league_all.columns:
-                seasons_desc = _seasons_desc(df_league_all["Stagione"].dropna().unique().tolist())
-            else:
-                seasons_desc = []
-            with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
-                default_curr = _pick_current_season(seasons_desc) if seasons_desc else []
-                selected_stats_seasons = st.multiselect(
-                    "Scegli le stagioni da includere (se vuoto = tutte)",
-                    options=seasons_desc,
-                    default=default_curr,
-                    key=_k("stats_seasons_filter"),
-                )
-            df_stats_scope = df_league_all.copy()
-            if selected_stats_seasons:
-                df_stats_scope = df_stats_scope[df_stats_scope["Stagione"].astype(str).isin([str(s) for s in selected_stats_seasons])]
-
-            # Mostro blocchi macro già presenti in squadre.py
-            st.markdown(f"### Macro per {squadra_casa} (Home) e {squadra_ospite} (Away)")
-            if compute_team_macro_stats is not None:
-                stats_home = compute_team_macro_stats(df_stats_scope.copy(), squadra_casa, "Home")
-                stats_away = compute_team_macro_stats(df_stats_scope.copy(), squadra_ospite, "Away")
-                if stats_home and stats_away:
-                    df_comp = pd.DataFrame({squadra_casa: stats_home, squadra_ospite: stats_away})
-                    st.dataframe(df_comp, use_container_width=True)
-            if show_goal_patterns is not None:
-                st.markdown("### Goal Patterns")
-                try:
-                    country_code = df_stats_scope["country"].dropna().iloc[0] if not df_stats_scope.empty else ""
-                    first_season = df_stats_scope["Stagione"].dropna().astype(str).sort_values(ascending=False).iloc[0] if "Stagione" in df_stats_scope.columns and not df_stats_scope["Stagione"].dropna().empty else ""
-                    show_goal_patterns(df_stats_scope, squadra_casa, squadra_ospite, country_code, first_season)
-                except Exception:
-                    pass
+            seasons_desc = []
+        with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
+            default_curr = _pick_current_season(seasons_desc) if seasons_desc else []
+            selected_stats_seasons = st.multiselect(
+                "Scegli le stagioni da includere (se vuoto = tutte)",
+                options=seasons_desc,
+                default=default_curr,
+                key=_k("stats_seasons_filter"),
+            )
+        df_stats_scope = df_league_all.copy()
+        if selected_stats_seasons:
+            df_stats_scope = df_stats_scope[df_stats_scope["Stagione"].astype(str).isin([str(s) for s in selected_stats_seasons])]
+        render_team_stats_tab(df_stats_scope, league, squadra_casa, squadra_ospite)
 
     # === TAB 5: Correct Score ===
     with tab_cs:
@@ -1332,7 +1345,34 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         st.session_state["odd_h"] = float(odd_home)
         st.session_state["odd_d"] = float(odd_draw)
         st.session_state["odd_a"] = float(odd_away)
+
+        cL1, cL2 = st.columns([1,1])
+        with cL1:
+            live_minute = st.slider("⏲️ Minuto (prefill)", 1, 120, 45, key=_k("live:min"))
+            st.session_state["minlive"] = int(live_minute)
+        with cL2:
+            live_score = st.text_input("📟 Risultato live (prefill)", value="0-0", key=_k("live:score"))
+            st.session_state["scorelive"] = str(live_score).strip()
+
+        st.caption("Suggerimento: puoi modificare anche i controlli interni del modulo Live.")
         if _run_live is None:
-            st.info("Modulo Analisi Live non disponibile in questo ambiente.")
+            st.info("Modulo Live non disponibile in questo ambiente.")
         else:
-            _run_live(df_league_all)
+            _orig_set_cfg = getattr(st, "set_page_config", None)
+            try:
+                def _noop(*args, **kwargs): return None
+                st.set_page_config = _noop
+                _run_live(df_league_all)
+            except Exception as e:
+                st.warning(f"Modulo Live caricato con avviso: {e}")
+            finally:
+                if _orig_set_cfg:
+                    st.set_page_config = _orig_set_cfg
+
+    shared = _get_shared_quotes()
+    _set_qparams(
+        league=league, home=squadra_casa, away=squadra_ospite,
+        q=st.session_state.get(_k("search_team"), "") or "",
+        qh=odd_home, qd=odd_draw, qa=odd_away,
+        ov15=shared["ov15"], ov25=shared["ov25"], ov35=shared["ov35"], btts=shared["btts"],
+    )
