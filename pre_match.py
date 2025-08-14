@@ -363,7 +363,7 @@ def _calc_market_roi(df: pd.DataFrame, market: str, price_cols,
 @st.cache_data(show_spinner=False, ttl=900)
 def _calc_market_roi_cached(df_light: pd.DataFrame, market: str, price_cols: tuple[str, ...],
                             line: float | None, commission: float, manual_price: float | None):
-    return _calc_market_roi(df_light.copy(), list(price_cols), line, commission, manual_price)
+    return _calc_market_roi(df_light.copy(), market, list(price_cols), line, commission, manual_price)
 
 
 # ========= Probabilità storiche per EV =========
