@@ -812,13 +812,7 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
             use_container_width=True,
             height=88,
             column_config={
-                "Δ Win%":   st.column_config.NumberColumn(format="%+.1f"),
-                "Δ Draw%":  st.column_config.NumberColumn(format="%+.1f"),
-                "Δ Loss%":  st.column_config.NumberColumn(format="%+.1f"),
-                "Δ GF":     st.column_config.NumberColumn(format="%+.2f"),
-                "Δ GA":     st.column_config.NumberColumn(format="%+.2f"),
-                "Δ ELO":    st.column_config.NumberColumn(format="%+.1f"),
-                "Δ Form":   st.column_config.NumberColumn(format="%+.2f"),
+
                 "N (ultime)": st.column_config.NumberColumn(format="%.0f"),
                 "N (tot)":    st.column_config.NumberColumn(format="%.0f"),
             },
