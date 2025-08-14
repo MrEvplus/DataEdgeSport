@@ -1,4 +1,4 @@
-# pre_match.py — versione completa con ottimizzazioni e filtri Campionato/Stagioni dal solo HUB
+# pre_match.py — versione completa, con Macro KPI Plus e integrazione con i filtri globali dell’HUB
 from __future__ import annotations
 
 import re
@@ -8,11 +8,40 @@ import pandas as pd
 import numpy as np
 import altair as alt
 
-from squadre import compute_team_macro_stats, render_team_stats_tab
+# ----- Moduli esterni (robusti ai nomi differenti già presenti nel progetto) -----
+# Team stats
+try:
+    from squadre import compute_team_macro_stats, render_team_stats_tab
+except Exception:
+    # Fallback se i nomi non coincidono: tenteremo in team_stats.py
+    try:
+        from team_stats import compute_team_macro_stats, render_team_stats_tab  # type: ignore
+    except Exception:
+        compute_team_macro_stats = None  # type: ignore
+        def render_team_stats_tab(*args, **kwargs):
+            st.info("Modulo 'squadre/team_stats' non disponibile: scheda 'Statistiche squadre' limitata.")
+
+# Labeling quote
 from utils import label_match
-from correct_score import run_correct_score_panel  # <-- già presente
-# >>> Live module import
-from analisi_live_minuto import run_live_minute_analysis  # modulo Live integrato
+
+# Correct Score (fallback ai diversi nomi usati nel progetto)
+try:
+    from correct_score import run_correct_score_panel
+except Exception:
+    try:
+        from correct_score_ev_sezione import run_correct_score_ev as run_correct_score_panel  # type: ignore
+    except Exception:
+        run_correct_score_panel = None  # type: ignore
+
+# Live — nomi funzione diversi in alcune versioni
+try:
+    from analisi_live_minuto import run_live_minuto_analysis as _run_live
+except Exception:
+    try:
+        from analisi_live_minuto import run_live_minute_analysis as _run_live  # type: ignore
+    except Exception:
+        _run_live = None  # type: ignore
+
 
 # ==========================
 # Config: usa SEMPRE filtri globali dall'Hub (niente selettori locali)
@@ -20,6 +49,7 @@ from analisi_live_minuto import run_live_minute_analysis  # modulo Live integrat
 USE_GLOBAL_FILTERS = True
 GLOBAL_CHAMP_KEY   = "global_country"
 GLOBAL_SEASONS_KEY = "global_seasons"   # lista di stagioni scelte nell’Hub
+
 
 # ==========================
 # Altair Theme (globale)
@@ -39,6 +69,7 @@ try:
     alt.themes.enable("app_theme")
 except Exception:
     pass
+
 
 # ==========================
 # Helper generali
@@ -107,6 +138,7 @@ def _set_qparams(**kwargs):
     except Exception:
         st.experimental_set_query_params(**qp)
 
+
 # ==========================
 # Stagioni (ordina dalla più recente)
 # ==========================
@@ -142,21 +174,16 @@ def _pick_current_season(seasons_desc: list[str]) -> list[str]:
         f"{sy}–{ey}",  f"{sy}–{ey2}",  # en dash
         str(sy), str(ey)                   # anno solare
     ]
-
-    # match esatto
     for cand in candidates:
         for s in seasons_desc:
             if s.strip() == cand:
                 return [s]
-
-    # fallback 1: contiene sy o ey
     for s in seasons_desc:
         txt = s.strip()
         if str(sy) in txt or str(ey) in txt:
             return [s]
-
-    # fallback 2: la prima più recente
     return seasons_desc[:1]
+
 
 # ==========================
 # Quote condivise (sincronizzate tra tab)
@@ -175,7 +202,6 @@ def _shared_number_input(label: str, shared_name: str, local_key: str,
                          min_value: float = 1.01, step: float = 0.01):
     """Widget locale che scrive sulle quote condivise."""
     _init_shared_quotes()
-    # mantieni il locale allineato allo shared
     if local_key not in st.session_state:
         st.session_state[local_key] = float(st.session_state[_shared_key(shared_name)])
 
@@ -198,6 +224,7 @@ def _get_shared_quotes() -> dict:
         "ov35": float(st.session_state[_shared_key("ov35")]),
         "btts": float(st.session_state[_shared_key("btts")]),
     }
+
 
 # ==========================
 # League data by Label (robusta) + cache
@@ -222,8 +249,9 @@ def _league_data_by_label_cached(df_light: pd.DataFrame, label: str | None) -> d
     if label:
         row = group[group["Label"] == label]
     else:
-        row = group  # None -> ritorna comunque i valori (usato come fallback)
+        row = group
     return row.iloc[0].to_dict() if not row.empty else None
+
 
 # ==========================
 # Back/Lay 1x2 (robusto) + cache
@@ -283,6 +311,7 @@ def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
 @st.cache_data(show_spinner=False, ttl=900)
 def _calc_back_lay_1x2_cached(df_light: pd.DataFrame, commission: float = 0.0):
     return _calc_back_lay_1x2(df_light.copy(), commission)
+
 
 # ==========================
 # ROI Over/Under/BTTS + cache
@@ -349,8 +378,8 @@ def _calc_market_roi(df: pd.DataFrame, market: str, price_cols: list[str],
 @st.cache_data(show_spinner=False, ttl=900)
 def _calc_market_roi_cached(df_light: pd.DataFrame, market: str, price_cols: tuple[str, ...],
                             line: float | None, commission: float, manual_price: float | None):
-    # df_light è già ridotto alle colonne utili
-    return _calc_market_roi(df_light.copy(), market, list(price_cols), line, commission, manual_price)
+    return _calc_market_roi(df_light.copy(), list(price_cols), line, commission, manual_price)
+
 
 # ==========================
 # Probabilità storiche per EV
@@ -373,6 +402,7 @@ def _quality_label(n: int) -> str:
     if n >= 20:
         return "MEDIO"
     return "BASSO"
+
 
 # ==========================
 # EV storico – tabella + Best EV + cache
@@ -443,6 +473,354 @@ def _build_ev_table_cached(home_ctx_light: pd.DataFrame, away_ctx_light: pd.Data
     return _build_ev_table(home_ctx_light.copy(), away_ctx_light.copy(), h2h_light.copy(),
                            squadra_casa, squadra_ospite, quota_ov15, quota_ov25, quota_ov35, quota_btts)
 
+
+# ================================================================
+# ===============  MACRO KPI PLUS (4 blocchi)  ===================
+# ================================================================
+_MIN_RE = re.compile(r"\d+")
+
+def _mins_list(cell):
+    if cell is None:
+        return []
+    s = str(cell)
+    vals = []
+    for m in _MIN_RE.findall(s):
+        try:
+            v = int(m)
+            if 0 < v <= 130:
+                vals.append(v)
+        except Exception:
+            pass
+    return sorted(vals)
+
+def _first_goal_side_min(row):
+    h_raw = row.get("minuti goal segnato home", row.get("Minuti Goal Home"))
+    a_raw = row.get("minuti goal segnato away", row.get("Minuti Goal Away"))
+    if (h_raw is None or str(h_raw).strip() == "") and any(c in row for c in [f"gh{i}" for i in range(1,10)]):
+        hs = []
+        for i in range(1,10):
+            c = f"gh{i}"
+            if c in row and pd.notna(row[c]):
+                hs.append(row[c])
+        h_raw = ";".join(str(x) for x in hs) if hs else ""
+    if (a_raw is None or str(a_raw).strip() == "") and any(c in row for c in [f"ga{i}" for i in range(1,10)]):
+        aa = []
+        for i in range(1,10):
+            c = f"ga{i}"
+            if c in row and pd.notna(row[c]):
+                aa.append(row[c])
+        a_raw = ";".join(str(x) for x in aa) if aa else ""
+
+    hm = _mins_list(h_raw)
+    am = _mins_list(a_raw)
+    h1 = hm[0] if hm else None
+    a1 = am[0] if am else None
+    if h1 is None and a1 is None:
+        return (None, None)
+    if h1 is None:
+        return ("Away", a1)
+    if a1 is None:
+        return ("Home", h1)
+    if h1 < a1:
+        return ("Home", h1)
+    if a1 < h1:
+        return ("Away", a1)
+    return (None, None)
+
+def _team_df(df, team, side):
+    if side == "Home":
+        return df[df["Home"].astype(str) == str(team)].copy()
+    else:
+        return df[df["Away"].astype(str) == str(team)].copy()
+
+def _w_d_l(df, side):
+    if df.empty:
+        return (0.0, 0.0, 0.0)
+    if side == "Home":
+        w = (df["Home Goal FT"] > df["Away Goal FT"]).mean()
+        d = (df["Home Goal FT"] == df["Away Goal FT"]).mean()
+        l = (df["Home Goal FT"] < df["Away Goal FT"]).mean()
+    else:
+        w = (df["Away Goal FT"] > df["Home Goal FT"]).mean()
+        d = (df["Away Goal FT"] == df["Home Goal FT"]).mean()
+        l = (df["Away Goal FT"] < df["Home Goal FT"]).mean()
+    w = 0 if np.isnan(w) else float(w)
+    d = 0 if np.isnan(d) else float(d)
+    l = 0 if np.isnan(l) else float(l)
+    s = w + d + l
+    if s <= 0:
+        return (0.0, 0.0, 0.0)
+    return (w/s, d/s, l/s)
+
+def _gf_ga(df, side):
+    if df.empty:
+        return (0.0, 0.0)
+    if side == "Home":
+        return (df["Home Goal FT"].mean(), df["Away Goal FT"].mean())
+    else:
+        return (df["Away Goal FT"].mean(), df["Home Goal FT"].mean())
+
+def _shots(df, side):
+    cols = {  # FT totals
+        "h_shots": "suth", "a_shots": "suta",
+        "h_sot": "sutht", "a_sot": "sutat",
+    }
+    for c in cols.values():
+        if c not in df.columns:
+            df[c] = np.nan
+
+    if side == "Home":
+        sf = df[cols["h_shots"]].astype(float)
+        sa = df[cols["a_shots"]].astype(float)
+        sotf = df[cols["h_sot"]].astype(float)
+        sota = df[cols["a_sot"]].astype(float)
+    else:
+        sf = df[cols["a_shots"]].astype(float)
+        sa = df[cols["h_shots"]].astype(float)
+        sotf = df[cols["a_sot"]].astype(float)
+        sota = df[cols["h_sot"]].astype(float)
+
+    pace = np.nanmean(sf + sa)
+    return {
+        "shots_for": np.nansum(sf), "shots_against": np.nansum(sa),
+        "sot_for": np.nansum(sotf), "sot_against": np.nansum(sota),
+        "pace_avg": pace
+    }
+
+def _btts_over(df):
+    if df.empty:
+        return (0.0, 0.0)
+    btts = ((df["Home Goal FT"]>0) & (df["Away Goal FT"]>0)).mean()
+    over25 = ((df["Home Goal FT"] + df["Away Goal FT"]) > 2.5).mean()
+    return (0 if np.isnan(btts) else float(btts), 0 if np.isnan(over25) else float(over25))
+
+def _reliability_stars(n):
+    if n >= 45: return "★★★★★"
+    if n >= 30: return "★★★★☆"
+    if n >= 20: return "★★★☆☆"
+    if n >= 10: return "★★☆☆☆"
+    if n >= 5:  return "★☆☆☆☆"
+    return "—"
+
+def _momentum_block(df, team, side, last_n=8):
+    df_side = _team_df(df, team, side)
+    n_all = len(df_side)
+    if n_all == 0:
+        return None
+    w0, d0, l0 = _w_d_l(df_side, side)
+    gf0, ga0 = _gf_ga(df_side, side)
+    if "Data" in df_side.columns:
+        df_side = df_side.sort_values("Data")
+    df_last = df_side.tail(last_n)
+    w1, d1, l1 = _w_d_l(df_last, side)
+    gf1, ga1 = _gf_ga(df_last, side)
+    delta = {"Win%": (w1 - w0) * 100, "Draw%": (d1 - d0) * 100, "Loss%": (l1 - l0) * 100, "GFΔ": gf1 - gf0, "GAΔ": ga1 - ga0}
+    elo_col = "ELO Home" if side=="Home" else "ELO Away"
+    form_col = "Form Home" if side=="Home" else "Form Away"
+    elo_delta = None; form_delta = None
+    if elo_col in df_side.columns:
+        e0 = df_side[elo_col].mean(); e1 = df_last[elo_col].mean()
+        if not (np.isnan(e0) or np.isnan(e1)): elo_delta = e1 - e0
+    if form_col in df_side.columns:
+        f0 = df_side[form_col].mean(); f1 = df_last[form_col].mean()
+        if not (np.isnan(f0) or np.isnan(f1)): form_delta = f1 - f0
+    rel = _reliability_stars(len(df_last))
+    return {"n_all": n_all, "n_last": len(df_last), "delta": delta, "elo_delta": elo_delta, "form_delta": form_delta, "rel": rel}
+
+def _first_goal_tables(df, team_home, team_away):
+    if df.empty:
+        return None
+    work = df.copy()
+    if "Data" in work.columns:
+        work = work.sort_values("Data")
+    who, minute = [], []
+    for _, r in work.iterrows():
+        s, m = _first_goal_side_min(r)
+        who.append(s); minute.append(m)
+    work["first_side"] = who; work["first_min"]  = minute
+
+    def _outcome(row):
+        if row["Home Goal FT"] > row["Away Goal FT"]: return "1"
+        if row["Home Goal FT"] < row["Away Goal FT"]: return "2"
+        return "X"
+
+    work["FT"] = work.apply(_outcome, axis=1)
+    t_home = work[work["first_side"] == "Home"]
+    t_away = work[work["first_side"] == "Away"]
+
+    def _pivot(a):
+        if a.empty:
+            return pd.DataFrame({"Esito": ["1","X","2"], "Freq %": [0,0,0]})
+        p = (a["FT"].value_counts(normalize=True) * 100).reindex(["1","X","2"]).fillna(0).reset_index()
+        p.columns = ["Esito","Freq %"]
+        return p
+
+    tab_home = _pivot(t_home)
+    tab_away = _pivot(t_away)
+
+    bins = [(0,15),(16,30),(31,45),(46,60),(61,75),(76,90)]
+    labels = [f"{a}-{b}" for a,b in bins]
+    counts = {lab:0 for lab in labels}
+    mm = [m for m in work["first_min"].tolist() if isinstance(m, (int,float))]
+    for m in mm:
+        for (a,b),lab in zip(bins, labels):
+            if a < m <= b:
+                counts[lab] += 1
+                break
+    hist = pd.DataFrame({"Finestra": labels, "Occorrenze": [counts[l] for l in labels]})
+    return {"home_first": tab_home, "away_first": tab_away, "hist": hist}
+
+def _style_rhythm_block(df, team, side):
+    df_side = _team_df(df, team, side)
+    if df_side.empty:
+        return None
+    shots = _shots(df_side, side)
+    gf_sum = df_side["Home Goal FT"].sum() if side=="Home" else df_side["Away Goal FT"].sum()
+    ga_sum = df_side["Away Goal FT"].sum() if side=="Home" else df_side["Home Goal FT"].sum()
+    conv = np.nan
+    if shots["sot_for"] and shots["sot_for"] > 0:
+        conv = gf_sum / shots["sot_for"]
+    savep = np.nan
+    if shots["sot_against"] and shots["sot_against"] > 0:
+        savep = 1.0 - (ga_sum / shots["sot_against"])
+    n = len(df_side)
+    pace_pm = shots["shots_for"] + shots["shots_against"]
+    pace_pm = (pace_pm / n) if n>0 else np.nan
+    btts, over25 = _btts_over(df_side)
+    return {"pace": pace_pm, "conv": conv, "save": savep, "btts": btts, "over25": over25, "n": n}
+
+def _calibration_one(df, market: str, k_bins=5):
+    col_map = {"Home": "Odd home", "Draw": "Odd Draw", "Away": "Odd Away"}
+    col = col_map.get(market)
+    if not col or col not in df.columns:
+        return pd.DataFrame(columns=["Bin Quota","Implied %","Observed %","N","Brier"])
+    d = df[[col, "Home Goal FT", "Away Goal FT"]].dropna().copy()
+    if d.empty:
+        return pd.DataFrame(columns=["Bin Quota","Implied %","Observed %","N","Brier"])
+    if market == "Home":
+        d["y"] = (d["Home Goal FT"] > d["Away Goal FT"]).astype(int)
+    elif market == "Away":
+        d["y"] = (d["Away Goal FT"] > d["Home Goal FT"]).astype(int)
+    else:
+        d["y"] = (d["Home Goal FT"] == d["Away Goal FT"]).astype(int)
+    d["p"] = 1.0 / d[col].astype(float)
+    d = d[(d["p"]>0) & (d["p"]<=1.0)]
+    qs = np.linspace(0, 1, k_bins+1)
+    edges = d[col].quantile(qs).values
+    edges = np.unique(np.round(edges, 4))
+    if len(edges) < 3:
+        edges = np.array([d[col].min(), d[col].median(), d[col].max()])
+    d["bin"] = pd.cut(d[col], bins=edges, include_lowest=True, duplicates="drop")
+    res = []
+    for b, g in d.groupby("bin"):
+        if g.empty: 
+            continue
+        implied = g["p"].mean(); obs = g["y"].mean()
+        brier = np.mean((g["p"] - g["y"])**2)
+        res.append({"Bin Quota": str(b),"Implied %": round(implied*100,1),"Observed %": round(obs*100,1),"N": int(len(g)),"Brier": round(brier,4)})
+    return pd.DataFrame(res)
+
+def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
+    st.markdown("### 🔬 Approfondimenti Macro KPI (complementari a 1X2)")
+
+    st.subheader("1) 📈 Momentum & Affidabilità")
+    c1, c2 = st.columns(2)
+    last_n = st.slider("Ultime N gare per Momentum", 6, 12, 8, key="mom_lastn")
+    with c1:
+        mH = _momentum_block(df_ctx, home_team, "Home", last_n=last_n)
+        if mH is None:
+            st.info(f"Nessun dato per **{home_team}** in casa.")
+        else:
+            st.markdown(f"**{home_team} @casa** — campione: {mH['n_all']} • recenti: {mH['n_last']} • affidabilità: {mH['rel']}")
+            rows = [["Δ Win%", f"{mH['delta']['Win%']:+.1f}%"],
+                    ["Δ Draw%", f"{mH['delta']['Draw%']:+.1f}%"],
+                    ["Δ Loss%", f"{mH['delta']['Loss%']:+.1f}%"],
+                    ["Δ GF", f"{mH['delta']['GFΔ']:+.2f}"],
+                    ["Δ GA", f"{mH['delta']['GAΔ']:+.2f}"]]
+            if mH["elo_delta"] is not None: rows.append(["Δ ELO", f"{mH['elo_delta']:+.1f}"])
+            if mH["form_delta"] is not None: rows.append(["Δ Form", f"{mH['form_delta']:+.2f}"])
+            st.table(pd.DataFrame(rows, columns=["KPI","Δ (ultime vs baseline)"]))
+    with c2:
+        mA = _momentum_block(df_ctx, away_team, "Away", last_n=last_n)
+        if mA is None:
+            st.info(f"Nessun dato per **{away_team}** in trasferta.")
+        else:
+            st.markdown(f"**{away_team} @trasferta** — campione: {mA['n_all']} • recenti: {mA['n_last']} • affidabilità: {mA['rel']}")
+            rows = [["Δ Win%", f"{mA['delta']['Win%']:+.1f}%"],
+                    ["Δ Draw%", f"{mA['delta']['Draw%']:+.1f}%"],
+                    ["Δ Loss%", f"{mA['delta']['Loss%']:+.1f}%"],
+                    ["Δ GF", f"{mA['delta']['GFΔ']:+.2f}"],
+                    ["Δ GA", f"{mA['delta']['GAΔ']:+.2f}"]]
+            if mA["elo_delta"] is not None: rows.append(["Δ ELO", f"{mA['elo_delta']:+.1f}"])
+            if mA["form_delta"] is not None: rows.append(["Δ Form", f"{mA['form_delta']:+.2f}"])
+            st.table(pd.DataFrame(rows, columns=["KPI","Δ (ultime vs baseline)"]))
+
+    st.divider()
+
+    st.subheader("2) ⏱️ Primo Gol → Esito (Pressione & Rimonte)")
+    fg = _first_goal_tables(df_ctx, home_team, away_team)
+    if fg is None:
+        st.info("Dati minuti gol non disponibili.")
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Se segna prima la squadra di Casa (Home-first)**")
+            st.table(fg["home_first"])
+        with c2:
+            st.markdown("**Se segna prima la squadra in Trasferta (Away-first)**")
+            st.table(fg["away_first"])
+        st.markdown("**Distribuzione minuto del primo gol** (finestre)")
+        st.bar_chart(fg["hist"].set_index("Finestra"))
+
+    st.divider()
+
+    st.subheader("3) ⚙️ Stile & Ritmo (pace / precisione SOT→Gol / save% / BTTS / Over2.5)")
+    c1, c2 = st.columns(2)
+    with c1:
+        sH = _style_rhythm_block(df_ctx, home_team, "Home")
+        if sH is None:
+            st.info(f"Nessun dato per **{home_team}** in casa.")
+        else:
+            st.markdown(f"**{home_team} @casa** — campione: {sH['n']}")
+            df_card = pd.DataFrame([
+                ["Pace (tiri tot / match)", f"{sH['pace']:.2f}"],
+                ["Precisione SOT→Gol", f"{(sH['conv']*100):.1f}%"] if not np.isnan(sH["conv"]) else ["Precisione SOT→Gol", "N/D"],
+                ["Save% (approx)", f"{(sH['save']*100):.1f}%"] if not np.isnan(sH["save"]) else ["Save% (approx)", "N/D"],
+                ["BTTS%", f"{(sH['btts']*100):.1f}%"],
+                ["Over 2.5%", f"{(sH['over25']*100):.1f}%"],
+            ], columns=["KPI","Valore"])
+            st.table(df_card)
+    with c2:
+        sA = _style_rhythm_block(df_ctx, away_team, "Away")
+        if sA is None:
+            st.info(f"Nessun dato per **{away_team}** in trasferta.")
+        else:
+            st.markdown(f"**{away_team} @trasferta** — campione: {sA['n']}")
+            df_card = pd.DataFrame([
+                ["Pace (tiri tot / match)", f"{sA['pace']:.2f}"],
+                ["Precisione SOT→Gol", f"{(sA['conv']*100):.1f}%"] if not np.isnan(sA["conv"]) else ["Precisione SOT→Gol", "N/D"],
+                ["Save% (approx)", f"{(sA['save']*100):.1f}%"] if not np.isnan(sA["save"]) else ["Save% (approx)", "N/D"],
+                ["BTTS%", f"{(sA['btts']*100):.1f}%"],
+                ["Over 2.5%", f"{(sA['over25']*100):.1f}%"],
+            ], columns=["KPI","Valore"])
+            st.table(df_card)
+
+    st.divider()
+
+    st.subheader("4) 🎯 Calibration 1X2 (Quote → Outcome)")
+    with st.expander("Mostra tabelle calibrazione per Home / Draw / Away", expanded=True):
+        tabs = st.tabs(["Home", "Draw", "Away"])
+        with tabs[0]:
+            st.caption("Quanto sono calibrate le quote Home in questo contesto (implied vs observed, + Brier score).")
+            st.dataframe(_calibration_one(df_ctx, "Home"), use_container_width=True)
+        with tabs[1]:
+            st.caption("Quanto sono calibrate le quote Draw in questo contesto.")
+            st.dataframe(_calibration_one(df_ctx, "Draw"), use_container_width=True)
+        with tabs[2]:
+            st.caption("Quanto sono calibrate le quote Away in questo contesto.")
+            st.dataframe(_calibration_one(df_ctx, "Away"), use_container_width=True)
+
+
 # ==========================
 # ENTRY POINT (PRE-MATCH)
 # ==========================
@@ -452,7 +830,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     qin = _get_qparams()
     _init_shared_quotes()  # prepara le quote condivise
 
-    # Normalizzazione + CONTEX
     if "country" not in df.columns:
         st.error("Dataset senza colonna 'country'.")
         st.stop()
@@ -467,32 +844,24 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         df = df[df["country"] == league] if league else df
         if seasons_from_hub and "Stagione" in df.columns:
             df = df[df["Stagione"].astype(str).isin([str(s) for s in seasons_from_hub])]
-        # Badge informativo
         txt_seas = ", ".join([str(s) for s in seasons_from_hub]) if seasons_from_hub else "tutte"
         st.caption(f"Contesto: **{league}** • **Stagioni**: {txt_seas}")
-        # Snapshot PRIMA di eventuali sotto-filtri interni (per tab Stats/CS/Live)
         df_league_all = df.copy()
         seasons_selected = seasons_from_hub or None
     else:
-        # ---- Modalità legacy (se mai servisse): lascia i selettori locali ----
+        # (modalità legacy eventuale)
         league = (db_selected or "").strip().upper()
         df = df[df["country"] == league]
         if df.empty:
             st.warning(f"Nessun dato per il campionato '{league}'.")
             st.stop()
-
         df_league_all = df.copy()
-        # ======== Filtro Stagioni (locale) ========
         seasons_selected = None
         if "Stagione" in df.columns:
             seasons_desc = _seasons_desc(df["Stagione"].dropna().unique().tolist())
             latest = seasons_desc[0] if seasons_desc else None
-
             with st.expander("⚙️ Filtro Stagioni", expanded=True):
-                st.markdown(
-                    "Seleziona la profondità storica da analizzare. "
-                    "**Intervallo rapido** parte dalla **stagione più recente** verso il passato."
-                )
+                st.markdown("Seleziona la profondità storica da analizzare. **Intervallo rapido** parte dalla **stagione più recente** verso il passato.")
                 colA, colB = st.columns([2, 1])
                 with colA:
                     seasons_selected = st.multiselect(
@@ -523,7 +892,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
                     st.caption("Filtro stagioni: **Tutte**")
                     seasons_selected = None
 
-    # Colonne base
     df["Home"] = _ensure_str(df["Home"]).str.strip()
     df["Away"] = _ensure_str(df["Away"]).str.strip()
     if "Label" not in df.columns:
@@ -649,7 +1017,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     )
 
     # ==========================
-    # TAB 1: 1X2 + macro KPI
+    # TAB 1: 1X2 + macro KPI (+ KPI PLUS)
     # ==========================
     with tab_1x2:
         st.markdown(
@@ -660,7 +1028,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
 
         df_league_scope = df[df["Label"] == label] if label else df
 
-        # ➜ riduci colonne per cache/hash più leggeri
         cols_1x2 = ["Home","Away","Home Goal FT","Away Goal FT","Odd home","Odd Draw","Odd Away","Label"]
         df_league_light = df_league_scope[cols_1x2].copy()
         profits_back, rois_back, profits_lay, rois_lay, matches_league = _calc_back_lay_1x2_cached(df_league_light)
@@ -772,8 +1139,33 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
 
         @st.cache_data(show_spinner=False, ttl=900)
         def _macro_stats_cached(df_light: pd.DataFrame, team: str, side: str):
-            # wrapper per caching del modulo esterno
-            return compute_team_macro_stats(df_light.copy(), team, side)
+            if compute_team_macro_stats is None:
+                # mini fallback
+                d = df_light.copy()
+                if side == "Home":
+                    d = d[d["Home"] == team]
+                    stats = {
+                        "Matches Played": len(d),
+                        "Win %": (d["Home Goal FT"] > d["Away Goal FT"]).mean()*100 if len(d) else 0.0,
+                        "Draw %": (d["Home Goal FT"] == d["Away Goal FT"]).mean()*100 if len(d) else 0.0,
+                        "Loss %": (d["Home Goal FT"] < d["Away Goal FT"]).mean()*100 if len(d) else 0.0,
+                        "Avg Goals Scored": d["Home Goal FT"].mean() if len(d) else 0.0,
+                        "Avg Goals Conceded": d["Away Goal FT"].mean() if len(d) else 0.0,
+                        "BTTS %": ((d["Home Goal FT"]>0)&(d["Away Goal FT"]>0)).mean()*100 if len(d) else 0.0,
+                    }
+                else:
+                    d = d[d["Away"] == team]
+                    stats = {
+                        "Matches Played": len(d),
+                        "Win %": (d["Away Goal FT"] > d["Home Goal FT"]).mean()*100 if len(d) else 0.0,
+                        "Draw %": (d["Away Goal FT"] == d["Home Goal FT"]).mean()*100 if len(d) else 0.0,
+                        "Loss %": (d["Away Goal FT"] < d["Home Goal FT"]).mean()*100 if len(d) else 0.0,
+                        "Avg Goals Scored": d["Away Goal FT"].mean() if len(d) else 0.0,
+                        "Avg Goals Conceded": d["Home Goal FT"].mean() if len(d) else 0.0,
+                        "BTTS %": ((d["Home Goal FT"]>0)&(d["Away Goal FT"]>0)).mean()*100 if len(d) else 0.0,
+                    }
+                return stats
+            return compute_team_macro_stats(df_light.copy(), team, side)  # type: ignore
 
         df_stats_light = df[["Home","Away","Home Goal FT","Away Goal FT"]].copy()
         stats_home = _macro_stats_cached(df_stats_light, squadra_casa, "Home")
@@ -785,8 +1177,12 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             st.dataframe(df_comp, use_container_width=True, height=320)
             _download_df_button(df_comp.reset_index(), "macro_kpi.csv", "⬇️ Scarica Macro KPI CSV")
 
+        # 🔥 Macro KPI PLUS: i 4 blocchi aggiuntivi (inclusa Precisione SOT→Gol)
+        st.divider()
+        render_macro_kpi_plus(df_league_all, squadra_casa, squadra_ospite)
+
     # ==========================
-    # TAB 2: ROI mercati (campionato/label + squadre)
+    # TAB 2: ROI mercati
     # ==========================
     with tab_roi:
         st.markdown(
@@ -805,11 +1201,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         OVER35_COLS = ("cotao3", "Odd Over 3.5", "odd over 3,5", "Over 3.5")
         BTTS_YES_COLS = ("gg", "GG", "odd goal", "BTTS Yes", "Odd BTTS Yes")
 
-        # ➜ Usa le quote condivise inserite sopra
         shared = _get_shared_quotes()
         q_ov15, q_ov25, q_ov35, q_btts = shared["ov15"], shared["ov25"], shared["ov35"], shared["btts"]
 
-        # Riduci colonne per cache/hash
         def _light(df_in: pd.DataFrame, extra_cols: tuple[str, ...]) -> pd.DataFrame:
             base = ["Home Goal FT","Away Goal FT"]
             cols = list({*base, *extra_cols})
@@ -894,11 +1288,9 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             df_h2h = df_h2h[df_h2h["Label"] == label]
         df_h2h = _limit_last_n(df_h2h.dropna(subset=["Home Goal FT", "Away Goal FT"]), last_n)
 
-        # ➜ Usa quote condivise definite sopra
         shared = _get_shared_quotes()
         quota_ov15, quota_ov25, quota_ov35, quota_btts = shared["ov15"], shared["ov25"], shared["ov35"], shared["btts"]
 
-        # riduci per cache
         base_cols = ["Home Goal FT","Away Goal FT"]
         home_ctx_light = df_home_ctx[base_cols].copy()
         away_ctx_light = df_away_ctx[base_cols].copy()
@@ -951,7 +1343,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         _download_df_button(df_ev_squadre, "ev_storico_squadre.csv", "⬇️ Scarica EV Storico CSV")
 
     # ==========================
-    # TAB 4: Statistiche squadre (usa squadre.py)
+    # TAB 4: Statistiche squadre (usa squadre.py / team_stats.py)
     # ==========================
     with tab_stats:
         render_team_stats_tab(
@@ -962,30 +1354,33 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         )
 
     # ==========================
-    # TAB 5: Correct Score (Poisson + Dixon-Coles)
+    # TAB 5: Correct Score
     # ==========================
     with tab_cs:
         st.subheader("Correct Score – Poisson + Dixon-Coles")
         st.caption("Stima λ con shrink verso media di lega + forma recente. Heatmap, top score e EV sui punteggi corretti.")
-        run_correct_score_panel(
-            df=df_league_all,
-            league_code=league,
-            home_team=squadra_casa,
-            away_team=squadra_ospite,
-            seasons=seasons_selected or None,
-            default_rho=-0.05,
-            default_kappa=3.0,
-            default_recent_weight=0.25,
-            default_recent_n=6,
-            default_max_goals=6,
-        )
+        if run_correct_score_panel is None:
+            st.info("Modulo Correct Score non disponibile in questo ambiente.")
+        else:
+            run_correct_score_panel(
+                df=df_league_all,
+                league_code=league,
+                home_team=squadra_casa,
+                away_team=squadra_ospite,
+                seasons=seasons_selected or None,
+                default_rho=-0.05,
+                default_kappa=3.0,
+                default_recent_weight=0.25,
+                default_recent_n=6,
+                default_max_goals=6,
+            )
 
     # ==========================
-    # TAB 6: Live da Minuto (integrazione modulo)
+    # TAB 6: Live da Minuto
     # ==========================
     with tab_live:
         st.markdown("**Analisi Live** — precompilata con i dati selezionati sopra.")
-        st.session_state["campionato_corrente"] = league  # usato dal modulo Live
+        st.session_state["campionato_corrente"] = league
         st.session_state["home_live"] = squadra_casa
         st.session_state["away_live"] = squadra_ospite
         st.session_state["odd_h"] = float(odd_home)
@@ -1001,18 +1396,19 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             st.session_state["scorelive"] = str(live_score).strip()
 
         st.caption("Suggerimento: puoi modificare anche i controlli interni del modulo Live.")
-
-        # Evita l’errore Streamlit quando un modulo figlio richiama set_page_config
-        _orig_set_cfg = getattr(st, "set_page_config", None)
-        try:
-            def _noop(*args, **kwargs): return None
-            st.set_page_config = _noop  # no-op locale
-            run_live_minute_analysis(df_league_all)
-        except Exception as e:
-            st.warning(f"Modulo Live caricato con avviso: {e}")
-        finally:
-            if _orig_set_cfg:
-                st.set_page_config = _orig_set_cfg
+        if _run_live is None:
+            st.info("Modulo Live non disponibile in questo ambiente.")
+        else:
+            _orig_set_cfg = getattr(st, "set_page_config", None)
+            try:
+                def _noop(*args, **kwargs): return None
+                st.set_page_config = _noop  # no-op locale
+                _run_live(df_league_all)     # esegui modulo live
+            except Exception as e:
+                st.warning(f"Modulo Live caricato con avviso: {e}")
+            finally:
+                if _orig_set_cfg:
+                    st.set_page_config = _orig_set_cfg
 
     # Aggiorna query params (opzionale)
     shared = _get_shared_quotes()
