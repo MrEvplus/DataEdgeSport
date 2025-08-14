@@ -268,25 +268,52 @@ def estimate_remaining_lambdas(df: pd.DataFrame, current_min: int, focus_home: b
 # =========================
 # -------- STYLERS --------
 # =========================
+# -------- STYLERS --------
 def _style_table(df_):
+    # Formatter per 'Fair': mostra ∞ se il valore è enorme (p ~ 0)
+    def _fmt_fair(v):
+        try:
+            fv = float(v)
+            if fv > 1e6:
+                return "∞"
+            return f"{fv:.2f}"
+        except Exception:
+            return v
+
     fmt_map = {}
+    # Formati di default
+    if "Quota" in df_.columns: fmt_map["Quota"] = "{:.2f}"
+    if "Fair"  in df_.columns: fmt_map["Fair"]  = _fmt_fair
+    if "EV"    in df_.columns: fmt_map["EV"]    = "{:.3f}"
+    if "Edge"  in df_.columns: fmt_map["Edge"]  = "{:.3f}"
+    if "½-Kelly %" in df_.columns: fmt_map["½-Kelly %"] = "{:.1f}%"
+
+    # Tutte le colonne che terminano con % le formatto come percentuale
     for col in df_.columns:
-        if col in ("Quota","Fair"): fmt_map[col] = "{:.2f}"
-        if col.endswith("%"):       fmt_map[col] = "{:.1f}%"
-        if col in ("EV","Edge"):    fmt_map[col] = "{:.3f}"
-        if col == "½-Kelly %":      fmt_map[col] = "{:.1f}%"
+        if str(col).endswith("%") and col not in fmt_map:
+            fmt_map[col] = "{:.1f}%"
+
+    # Evidenzia EV/Edge positivi/negativi
     def _bg_posneg(s):
-        out=[]
+        out = []
         for v in s:
-            try: fv=float(v)
-            except: out.append(""); continue
-            if fv>0:  out.append("background-color: rgba(34,197,94,0.14)")
-            elif fv<0:out.append("background-color: rgba(239,68,68,0.14)")
-            else:     out.append("")
+            try:
+                fv = float(v)
+            except Exception:
+                out.append("")
+                continue
+            if fv > 0:
+                out.append("background-color: rgba(34,197,94,0.14)")
+            elif fv < 0:
+                out.append("background-color: rgba(239,68,68,0.14)")
+            else:
+                out.append("")
         return out
+
     sty = df_.style.format(fmt_map)
-    for c in ("EV","EV %","Edge"):
-        if c in df_.columns: sty = sty.apply(_bg_posneg, subset=[c])
+    for c in ("EV", "EV %", "Edge"):
+        if c in df_.columns:
+            sty = sty.apply(_bg_posneg, subset=[c])
     return sty
 
 # ======== helpers Segnali (UI) ========
