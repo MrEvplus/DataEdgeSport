@@ -648,16 +648,25 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
         if block is None:
             st.info(f"Nessun dato per **{title}**.")
             return
+
+        # ✅ robusto: usa le chiavi con prefisso "Δ " e fallback a 0
+        dlt = block.get("delta", {}) or {}
         base = {
-            "Δ Win%": block["delta"]["Win%"],
-            "Δ Draw%": block["delta"]["Draw%"],
-            "Δ Loss%": block["delta"]["Loss%"],
-            "Δ GF": block["delta"]["GFΔ"],
-            "Δ GA": block["delta"]["GAΔ"],
+            "Δ Win%":  float(dlt.get("Δ Win%", 0.0)),
+            "Δ Draw%": float(dlt.get("Δ Draw%", 0.0)),
+            "Δ Loss%": float(dlt.get("Δ Loss%", 0.0)),
+            "Δ GF":    float(dlt.get("Δ GF", 0.0)),
+            "Δ GA":    float(dlt.get("Δ GA", 0.0)),
         }
-        if block["elo_delta"] is not None: base["Δ ELO"] = block["elo_delta"]
-        if block["form_delta"] is not None: base["Δ Form"] = block["form_delta"]
-        base["N (ultime)"] = block["n_last"]; base["N (tot)"] = block["n_all"]; base["Affidabilità"] = block["rel"]
+        if block.get("elo_delta") is not None:
+            base["Δ ELO"] = float(block["elo_delta"])
+        if block.get("form_delta") is not None:
+            base["Δ Form"] = float(block["form_delta"])
+
+        base["N (ultime)"] = int(block.get("n_last", 0))
+        base["N (tot)"]   = int(block.get("n_all", 0))
+        base["Affidabilità"] = block.get("rel", "—")
+
         dfm = pd.DataFrame([base])
 
         sty = _df_style_positive_negative(
@@ -665,28 +674,34 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
             pos_good_cols=["Δ Win%","Δ GF","Δ ELO","Δ Form"],
             neg_good_cols=["Δ Loss%","Δ GA"]
         )
-        st.caption(f"**{title}** — campione: {block['n_all']} • recenti: {block['n_last']} • affidabilità: {block['rel']}")
+        st.caption(
+            f"**{title}** — campione: {base['N (tot)']} • recenti: {base['N (ultime)']} • affidabilità: {base['Affidabilità']}"
+        )
         st.dataframe(
-            sty, use_container_width=True, height=88,
+            sty,
+            use_container_width=True,
+            height=88,
             column_config={
-                "Δ Win%": st.column_config.NumberColumn(format="+.1f"),
+                "Δ Win%":  st.column_config.NumberColumn(format="+.1f"),
                 "Δ Draw%": st.column_config.NumberColumn(format="+.1f"),
                 "Δ Loss%": st.column_config.NumberColumn(format="+.1f"),
-                "Δ GF": st.column_config.NumberColumn(format="+.2f"),
-                "Δ GA": st.column_config.NumberColumn(format="+.2f"),
-                "Δ ELO": st.column_config.NumberColumn(format="+.1f"),
-                "Δ Form": st.column_config.NumberColumn(format="+.2f"),
+                "Δ GF":    st.column_config.NumberColumn(format="+.2f"),
+                "Δ GA":    st.column_config.NumberColumn(format="+.2f"),
+                "Δ ELO":   st.column_config.NumberColumn(format="+.1f"),
+                "Δ Form":  st.column_config.NumberColumn(format="+.2f"),
                 "N (ultime)": st.column_config.NumberColumn(format="%.0f"),
-                "N (tot)": st.column_config.NumberColumn(format="%.0f"),
+                "N (tot)":    st.column_config.NumberColumn(format="%.0f"),
             },
         )
 
-    with c1: _render_mom(mH, f"{home_team} @casa")
-    with c2: _render_mom(mA, f"{away_team} @trasferta")
+    with c1:
+        _render_mom(mH, f"{home_team} @casa")
+    with c2:
+        _render_mom(mA, f"{away_team} @trasferta")
 
     st.divider()
 
-    # 2) Primo Gol → Esito — tabelle pro con progress bar + istogramma Altair
+    # 2) ⏱️ Primo Gol → Esito (Pressione & Rimonte)
     st.subheader("2) ⏱️ Primo Gol → Esito (Pressione & Rimonte)")
     fg = _first_goal_tables(df_ctx, home_team, away_team)
     if fg is None:
@@ -706,11 +721,13 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
                     "Freq %": st.column_config.ProgressColumn(format="%.1f%%", min_value=0.0, max_value=100.0),
                 },
             )
-        with c1: _render_fg(fg["home_first"], f"Se segna prima **{home_team}** (Home-first)")
-        with c2: _render_fg(fg["away_first"], f"Se segna prima **{away_team}** (Away-first)")
+        with c1:
+            _render_fg(fg["home_first"], f"Se segna prima **{home_team}** (Home-first)")
+        with c2:
+            _render_fg(fg["away_first"], f"Se segna prima **{away_team}** (Away-first)")
 
         base = alt.Chart(fg["hist"]).mark_bar().encode(
-            x=alt.X("Finestra:N", title="Finestra minuto"), 
+            x=alt.X("Finestra:N", title="Finestra minuto"),
             y=alt.Y("Occorrenze:Q", title="Occorrenze"),
             tooltip=["Finestra","Occorrenze"]
         ).properties(height=160, width="container")
@@ -718,7 +735,7 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
 
     st.divider()
 
-    # 3) Stile & Ritmo — tabelle pro una riga (kpi cards tabellari)
+    # 3) ⚙️ Stile & Ritmo
     st.subheader("3) ⚙️ Stile & Ritmo (pace / precisione SOT→Gol / save% / BTTS / Over2.5)")
     c1, c2 = st.columns(2)
     def _render_style(block, title):
@@ -727,30 +744,34 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
             return
         dfk = pd.DataFrame([{
             "Pace (tiri tot/match)": round(block["pace"], 2) if pd.notna(block["pace"]) else np.nan,
-            "Precisione SOT→Gol %": round(block["conv"]*100, 1) if not np.isnan(block["conv"]) else np.nan,
-            "Save % (approx)": round(block["save"]*100, 1) if not np.isnan(block["save"]) else np.nan,
-            "BTTS %": round(block["btts"]*100, 1),
-            "Over 2.5 %": round(block["over25"]*100, 1),
-            "Campione": int(block["n"])
+            "Precisione SOT→Gol %": round(block["conv"]*100, 1) if block.get("conv") is not None and not np.isnan(block["conv"]) else np.nan,
+            "Save % (approx)":      round(block["save"]*100, 1) if block.get("save") is not None and not np.isnan(block["save"]) else np.nan,
+            "BTTS %":               round(block["btts"]*100, 1),
+            "Over 2.5 %":           round(block["over25"]*100, 1),
+            "Campione":             int(block["n"])
         }])
         st.caption(title)
         st.dataframe(
-            dfk, use_container_width=True, height=80,
+            dfk,
+            use_container_width=True,
+            height=80,
             column_config={
                 "Pace (tiri tot/match)": st.column_config.NumberColumn(format="%.2f"),
                 "Precisione SOT→Gol %": st.column_config.NumberColumn(format="%.1f"),
-                "Save % (approx)": st.column_config.NumberColumn(format="%.1f"),
-                "BTTS %": st.column_config.NumberColumn(format="%.1f"),
-                "Over 2.5 %": st.column_config.NumberColumn(format="%.1f"),
-                "Campione": st.column_config.NumberColumn(format="%.0f"),
+                "Save % (approx)":      st.column_config.NumberColumn(format="%.1f"),
+                "BTTS %":               st.column_config.NumberColumn(format="%.1f"),
+                "Over 2.5 %":           st.column_config.NumberColumn(format="%.1f"),
+                "Campione":             st.column_config.NumberColumn(format="%.0f"),
             },
         )
-    with c1: _render_style(_style_rhythm_block(df_ctx, home_team, "Home"), f"**{home_team} @casa**")
-    with c2: _render_style(_style_rhythm_block(df_ctx, away_team, "Away"), f"**{away_team} @trasferta**")
+    with c1:
+        _render_style(_style_rhythm_block(df_ctx, home_team, "Home"), f"**{home_team} @casa**")
+    with c2:
+        _render_style(_style_rhythm_block(df_ctx, away_team, "Away"), f"**{away_team} @trasferta**")
 
     st.divider()
 
-    # 4) Calibration 1X2 — tabelle pro + mini chart
+    # 4) 🎯 Calibration 1X2
     st.subheader("4) 🎯 Calibration 1X2 (Quote → Outcome)")
     with st.expander("Mostra tabelle calibrazione per Home / Draw / Away", expanded=True):
         tabs = st.tabs(["Home", "Draw", "Away"])
@@ -761,19 +782,18 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
                 if dfc.empty:
                     st.info("Dati insufficienti.")
                 else:
-                    # tabella
                     st.dataframe(
                         dfc,
-                        use_container_width=True, height=220,
+                        use_container_width=True,
+                        height=220,
                         column_config={
                             "Implied %": st.column_config.NumberColumn(format="%.1f"),
                             "Observed %": st.column_config.NumberColumn(format="%.1f"),
-                            "Gap %": st.column_config.NumberColumn(format="+.1f"),
-                            "N": st.column_config.NumberColumn(format="%.0f"),
-                            "Brier": st.column_config.NumberColumn(format="%.4f"),
+                            "Gap %":      st.column_config.NumberColumn(format="+.1f"),
+                            "N":         st.column_config.NumberColumn(format="%.0f"),
+                            "Brier":     st.column_config.NumberColumn(format="%.4f"),
                         },
                     )
-                    # mini chart
                     ch = alt.Chart(dfc).transform_fold(
                         ["Implied %","Observed %"], as_=["Serie","Valore"]
                     ).mark_line(point=True).encode(
