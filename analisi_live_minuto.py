@@ -1,8 +1,7 @@
-# analisi_live_minuto.py — v4.2 ProTrader
-# UI pro a TAB per trader calcio: EV 1X2 Back/Lay, Over 0.5/1.5/2.5/3.5, BTTS
-# EV Advisor (AI score con opzionale boost dai Pattern), CS/Hedge, Post-minuto,
-# Segnali esterni (pattern/squadre/macros), write-back quote per Pre-Match.
-# Logica EV invariata; migliorie UI + patch formatter (Fair∞ e breakdown numerico).
+# analisi_live_minuto.py — v4.3 ProTrader
+# EV 1X2 Back/Lay, Over 0.5/1.5/2.5/3.5, BTTS • EV Advisor (AI score + Pattern boost opz.)
+# CS/Hedge, Post-minuto, Campionato/Squadra, Segnali esterni (pattern/squadre/macros)
+# NUOVO: tooltip su controlli, badge-legend, e POPUP guida con formule + Breakdown 1X2.
 
 import math
 from collections import defaultdict
@@ -49,6 +48,8 @@ div.stTabs [role="tablist"] button {font-weight:600;}
 .badge b {color:#fff;}
 .small {color: var(--muted); font-size:.85rem;}
 .ev-pill {padding:.2rem .45rem; border-radius:.5rem; background:var(--chip); border:1px solid var(--chip-border); font-size:.78rem; color:var(--text);}
+
+/* Data */
 table td, table th {vertical-align: middle;}
 .dataframe td {font-size: 0.92rem;}
 .dataframe th {font-size: 0.86rem; color: var(--muted);}
@@ -71,6 +72,16 @@ table td, table th {vertical-align: middle;}
 .pill.good {background: #e8f7ee; border-color:#bbf7d0;}
 .pill.warn {background: #fff4e5; border-color:#fde68a;}
 .pill.bad {background: #ffe8e8; border-color:#fecaca;}
+
+/* Modal (Guida) */
+.modal-mask { position: fixed; inset: 0; background: rgba(15,23,42,.66); z-index: 9999; display: flex; align-items: flex-start; justify-content: center; padding-top: 6vh; }
+.modal { background: var(--card); color: var(--text); border: 1px solid var(--chip-border); border-radius: 1rem; width: min(980px, 92vw); box-shadow: 0 20px 50px rgba(0,0,0,.4); }
+.modal header { display:flex; align-items:center; justify-content:space-between; padding: .9rem 1.1rem; border-bottom: 1px solid var(--chip-border); }
+.modal header h3 { margin: 0; font-size: 1.05rem; }
+.modal .body { padding: 1.0rem 1.2rem 1.2rem; }
+.modal .grid2 { display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1rem; }
+.modal .note { color: var(--muted); font-size: .92rem; }
+.close-btn { background:#ef4444; color:#fff; border:none; padding:.35rem .7rem; border-radius:.5rem; cursor:pointer; }
 </style>
 """
 
@@ -417,6 +428,76 @@ def _pattern_effects(pattern_obj):
     return eff
 
 # =========================
+# ------- MODAL/HELP ------
+# =========================
+def _open_help_btn():
+    if st.button("📘 Guida rapida — EV Advisor", help="Apri un pop-up con formule, definizioni e spiegazioni del Breakdown 1X2."):
+        st.session_state["show_help_ev"] = True
+
+def _render_modal_if_needed():
+    if not st.session_state.get("show_help_ev"): 
+        return
+    # Modal markup
+    st.markdown("""
+    <div class="modal-mask">
+      <div class="modal">
+        <header>
+          <h3>📘 Guida rapida — EV Advisor</h3>
+          <span></span>
+        </header>
+        <div class="body">
+          <div class="grid2">
+            <div>
+              <h4>Definizioni</h4>
+              <ul>
+                <li><b>Fair</b> = 1 / p (quota equa teorica).</li>
+                <li><b>Edge</b> = (Fair − Quota) / Fair.</li>
+                <li><b>EV Back</b> = p · (odds−1) · (1−comm) − (1−p).</li>
+                <li><b>EV Lay</b> (liability=1): stake s = 1/(odds−1), EV = (1−p) · s · (1−comm) − p.</li>
+                <li><b>½-Kelly</b> (solo Back) = 0.5 · Kelly · 100.</li>
+              </ul>
+              <p class="note">EV è il valore atteso per unità di stake (Back) oppure per unità di liability (Lay).</p>
+            </div>
+            <div>
+              <h4>Breakdown 1X2 (blend & prior)</h4>
+              <p>Stimiamo le probabilità 1-X-2 dal campione <em>stesso stato live</em>, poi le <b>blendiamo</b> con i subset squadra (Home @casa / Away @trasferta) pesati per numerosità (cap).</p>
+              <ul>
+                <li><code>p_main</code>: probabilità dal campione di lega/label (stesso minuto+score).</li>
+                <li><code>n_main</code>: numerosità del campione principale.</li>
+                <li><code>p_side</code>: probabilità dal subset squadra (Home @casa / Away @trasferta).</li>
+                <li><code>n_side</code>: numerosità dei subset squadra.</li>
+                <li><code>p_final</code>: blend(p_main, n_main, p_side, n_side) rinormalizzato su 1-X-2.</li>
+                <li><code>prior</code>: prior di lega/label nello stesso stato.</li>
+                <li><code>Δ</code>: differenza <code>p_final − prior</code>.</li>
+              </ul>
+              <p class="note">L'<b>AI score</b> cresce se EV&gt;0, campione solido e Δ alto; i <em>Pattern</em> (se attivati) modulano SOLO l'AI score.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    col_close = st.columns([1,1,1,1,1,1,1,1,1,1])[9]
+    with col_close:
+        if st.button("Chiudi", key="close_help_ev", help="Chiudi la guida rapida", type="primary"):
+            st.session_state["show_help_ev"] = False
+
+def _legend_badges():
+    st.markdown(
+        """
+        <div style="display:flex; flex-wrap:wrap; gap:.45rem; margin:.25rem 0 .5rem;">
+          <span class="badge" title="Quota equa teorica dal modello (1 / Prob). Viene visualizzato ∞ se la probabilità è ~0."><b>Fair</b></span>
+          <span class="badge" title="Quanto la tua quota si discosta dalla quota equa. (Fair − Quota) / Fair."><b>Edge</b></span>
+          <span class="badge" title="Valore atteso per unità di stake (Back) o per unità di liability (Lay)."><b>EV</b></span>
+          <span class="badge" title="Frazione operativa suggerita per puntate Back."><b>½-Kelly</b></span>
+          <span class="badge" title="Differenza tra probabilità stimata e prior di lega/label nello stesso stato."><b>Δ vs prior</b></span>
+          <span class="badge" title="Punteggio da 0 a 100 che combina EV, qualità del campione (log-scaled) e Δ vs prior."><b>AI score</b></span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+# =========================
 # ---------- MAIN ---------
 # =========================
 def run_live_minute_analysis(df: pd.DataFrame):
@@ -436,30 +517,39 @@ def run_live_minute_analysis(df: pd.DataFrame):
         with col0:
             champ = st.selectbox("🏆 Campionato", champ_options,
                                  index=champ_options.index(champ_default) if champ_default in champ_options else 0,
-                                 key="champ_live")
+                                 key="champ_live",
+                                 help="Seleziona il campionato da analizzare. Filtreremo lo storico a campionato+label.")
         with col1:
             c1,c2 = st.columns(2)
             with c1:
-                home_team = st.selectbox("🏠 Casa", sorted(df["Home"].dropna().unique()), key="home_live")
+                home_team = st.selectbox("🏠 Casa", sorted(df["Home"].dropna().unique()), key="home_live",
+                                         help="Squadra di casa della partita live.")
             with c2:
-                away_team = st.selectbox("🚪 Trasferta", sorted(df["Away"].dropna().unique()), key="away_live")
+                away_team = st.selectbox("🚪 Trasferta", sorted(df["Away"].dropna().unique()), key="away_live",
+                                         help="Squadra in trasferta della partita live.")
 
         st.subheader("Quote 1X2 Live")
         q1,q2,q3 = st.columns(3)
         with q1:
-            odd_home = st.number_input("📈 Quota Home (BACK)", 1.01, 50.0, float(st.session_state.get("odd_h",2.00)), step=0.01, key="odd_h")
+            odd_home = st.number_input("📈 Quota Home (BACK)", 1.01, 50.0, float(st.session_state.get("odd_h",2.00)), step=0.01, key="odd_h",
+                                       help="Quota per puntare sulla vittoria della squadra di casa.")
         with q2:
-            odd_draw = st.number_input("⚖️ Quota Pareggio (BACK)", 1.01, 50.0, float(st.session_state.get("odd_d",3.20)), step=0.01, key="odd_d")
+            odd_draw = st.number_input("⚖️ Quota Pareggio (BACK)", 1.01, 50.0, float(st.session_state.get("odd_d",3.20)), step=0.01, key="odd_d",
+                                       help="Quota per puntare sul pareggio.")
         with q3:
-            odd_away = st.number_input("📉 Quota Away (BACK)", 1.01, 50.0, float(st.session_state.get("odd_a",3.80)), step=0.01, key="odd_a")
+            odd_away = st.number_input("📉 Quota Away (BACK)", 1.01, 50.0, float(st.session_state.get("odd_a",3.80)), step=0.01, key="odd_a",
+                                       help="Quota per puntare sulla vittoria della squadra ospite.")
 
         l1,l2,l3 = st.columns(3)
         with l1:
-            lay_home = st.number_input("Quota Home (LAY)", 1.01, 50.0, value=float(round(odd_home+0.06,2)), step=0.01)
+            lay_home = st.number_input("Quota Home (LAY)", 1.01, 50.0, value=float(round(odd_home+0.06,2)), step=0.01,
+                                       help="Quota per bancare la vittoria della squadra di casa.")
         with l2:
-            lay_draw = st.number_input("Quota Pareggio (LAY)", 1.01, 50.0, value=float(round(odd_draw+0.06,2)), step=0.01)
+            lay_draw = st.number_input("Quota Pareggio (LAY)", 1.01, 50.0, value=float(round(odd_draw+0.06,2)), step=0.01,
+                                       help="Quota per bancare il pareggio.")
         with l3:
-            lay_away = st.number_input("Quota Away (LAY)", 1.01, 50.0, value=float(round(odd_away+0.06,2)), step=0.01)
+            lay_away = st.number_input("Quota Away (LAY)", 1.01, 50.0, value=float(round(odd_away+0.06,2)), step=0.01,
+                                       help="Quota per bancare la vittoria della squadra ospite.")
 
         st.session_state["quota_home"] = float(odd_home)
         st.session_state["quota_draw"] = float(odd_draw)
@@ -467,13 +557,17 @@ def run_live_minute_analysis(df: pd.DataFrame):
 
         c_live = st.columns([2,1,1,1])
         with c_live[0]:
-            current_min = st.slider("⏲️ Minuto attuale", 1, 120, int(st.session_state.get("minlive",45)), key="minlive")
+            current_min = st.slider("⏲️ Minuto attuale", 1, 120, int(st.session_state.get("minlive",45)), key="minlive",
+                                    help="Minuto reale della partita (serve a replicare lo stesso stato nei dati storici).")
         with c_live[1]:
-            live_score_txt = st.text_input("📟 Risultato live", str(st.session_state.get("scorelive","0-0")), key="scorelive")
+            live_score_txt = st.text_input("📟 Risultato live", str(st.session_state.get("scorelive","0-0")), key="scorelive",
+                                           help="Formato es. 0-0, 1-1, 2-1… Useremo il numero di gol al minuto per filtrare lo storico.")
         with c_live[2]:
-            commission = st.number_input("💸 Commissione exchange", 0.0, 0.10, 0.045, step=0.005)
+            commission = st.number_input("💸 Commissione exchange", 0.0, 0.10, 0.045, step=0.005,
+                                         help="Commissione % applicata dall'exchange (usata nel calcolo EV).")
         with c_live[3]:
-            show_ext = st.toggle("🔎 Usa segnali esterni", value=True)
+            show_ext = st.toggle("🔎 Usa segnali esterni", value=True,
+                                 help="Abilita Macro KPI, Pattern e Bias di lega (non alterano l’EV, possono pesare l’AI score).")
 
         parsed = safe_parse_score(live_score_txt)
         if not parsed:
@@ -492,17 +586,16 @@ def run_live_minute_analysis(df: pd.DataFrame):
 
         with st.expander("⚙️ Quote mercati Goal/BTTS (per EV)", expanded=False):
             oc1, oc2, oc3, oc4, oc5 = st.columns(5)
-            with oc1: q_over05 = st.number_input("Over 0.5", 1.01, 50.0, 1.30, step=0.01)
-            with oc2: q_over15 = st.number_input("Over 1.5", 1.01, 50.0, 1.65, step=0.01)
-            with oc3: q_over25 = st.number_input("Over 2.5", 1.01, 50.0, 2.40, step=0.01)
-            with oc4: q_over35 = st.number_input("Over 3.5", 1.01, 50.0, 3.75, step=0.01)
-            with oc5: q_btts   = st.number_input("BTTS (GG)", 1.01, 50.0, 2.10, step=0.01)
+            with oc1: q_over05 = st.number_input("Over 0.5", 1.01, 50.0, 1.30, step=0.01, help="Quota live Over 0.5 (serve per EV).")
+            with oc2: q_over15 = st.number_input("Over 1.5", 1.01, 50.0, 1.65, step=0.01, help="Quota live Over 1.5.")
+            with oc3: q_over25 = st.number_input("Over 2.5", 1.01, 50.0, 2.40, step=0.01, help="Quota live Over 2.5.")
+            with oc4: q_over35 = st.number_input("Over 3.5", 1.01, 50.0, 3.75, step=0.01, help="Quota live Over 3.5.")
+            with oc5: q_btts   = st.number_input("BTTS (GG)", 1.01, 50.0, 2.10, step=0.01, help="Quota live Entrambe segnano.")
 
-        # Write-back verso Pre-Match (condivisione)
+        # Write-back verso Pre-Match
         for k,v in [("ov05",q_over05),("ov15",q_over15),("ov25",q_over25),("ov35",q_over35),("btts",q_btts)]:
             _set_shared_quote(k, v)
 
-        # Persist context per altri tab
         st.session_state["_live_ctx"] = {
             "champ": champ, "home": home_team, "away": away_team,
             "odd_home": odd_home, "odd_draw": odd_draw, "odd_away": odd_away,
@@ -534,7 +627,7 @@ def run_live_minute_analysis(df: pd.DataFrame):
 
     st.caption(f"✅ Campione: {len(df_matched)} | {sample_badge(len(df_matched))} • Team focus: {home_team} / {away_team}")
 
-    # Probabilità 1X2 (blend campionato + subset)
+    # Probabilità 1X2 (blend)
     pH_L,pD_L,pA_L = _result_probs(df_matched)
     pH_H, pD_H, _   = _result_probs(df_home_side)
     _,    pD_A, pA_A= _result_probs(df_away_side)
@@ -558,7 +651,6 @@ def run_live_minute_analysis(df: pd.DataFrame):
     p_btts_side = _blend(_btts_prob(df_home_side), len(df_home_side), _btts_prob(df_away_side), len(df_away_side))
     p_btts = _blend(p_btts_L, len(df_matched), p_btts_side, len(df_home_side)+len(df_away_side))
 
-    # Priors lega/label
     priors = league_priors(df_league, live_h, live_a, over_lines)
 
     # ---------- EV ADVISOR ----------
@@ -605,8 +697,13 @@ def run_live_minute_analysis(df: pd.DataFrame):
         st.subheader("EV Advisor — ranking opportunità")
         st.caption(f"Contesto: **{champ} / {label_live}**, minuto **{current_min}'**, score **{live_h}-{live_a}** · campione **{len(df_matched)}** (blend con subset squadra Home/Away).")
 
-        apply_pat = st.toggle("Applica segnali Pattern all’AI score (non all’EV)", value=bool(pat_eff))
-        show_explain = st.toggle("Mostra breakdown calcolo (Perché questo numero?)", value=False)
+        _open_help_btn()          # bottone per modal
+        _render_modal_if_needed() # disegna modal se aperto
+
+        apply_pat = st.toggle("Applica segnali Pattern all’AI score (non all’EV)", value=bool(pat_eff),
+                              help="Se attivo, i Pattern modulano l'AI score (boost/malus per mercato) senza toccare l’EV.")
+        show_explain = st.toggle("Mostra breakdown calcolo (Perché questo numero?)", value=False,
+                                 help="Visualizza le componenti del blend 1-X-2 rispetto ai prior di lega/label.")
 
         view = df_ev_full.copy()
         if apply_pat and pat_eff:
@@ -620,18 +717,23 @@ def run_live_minute_analysis(df: pd.DataFrame):
 
         cflt1, cflt2, cflt3, cflt4 = st.columns([1,1,1,1.4])
         with cflt1:
-            only_pos = st.checkbox("Solo EV+", value=True)
+            only_pos = st.checkbox("Solo EV+", value=True, help="Mostra solo le opportunità con EV positivo.")
         with cflt2:
-            thr = st.number_input("Soglia EV% min", -20.0, 20.0, 0.0, step=0.5)
+            thr = st.number_input("Soglia EV% min", -20.0, 20.0, 0.0, step=0.5,
+                                  help="Filtra il ranking per valore atteso minimo (in percentuale).")
         with cflt3:
-            min_samp = st.number_input("Min campione", 0, 500, 30, step=10)
+            min_samp = st.number_input("Min campione", 0, 500, 30, step=10,
+                                       help="Escludi mercati con campione troppo piccolo (robustezza).")
         with cflt4:
-            order = st.selectbox("Ordina per", ["EV", "AI score", "AI +Signals", "Edge", "½-Kelly %"], index=0)
+            order = st.selectbox("Ordina per", ["EV", "AI score", "AI +Signals", "Edge", "½-Kelly %"], index=0,
+                                 help="Metrica per ordinare il ranking delle opportunità.")
 
         if only_pos: view = view[view["EV"] > 0]
         view = view[view["EV %"] >= thr]
         view = view[view["Campione"] >= min_samp]
         view = view.sort_values(order, ascending=False).reset_index(drop=True)
+
+        _legend_badges()  # mini legenda con tooltip nativi (title)
 
         cols_show = ["Mercato","Tipo","Quota","Prob %","Fair","Edge","EV","EV %","½-Kelly %","Campione","Δ vs prior","AI score","AI +Signals","Signals tag"]
         st.dataframe(_style_table(view[cols_show]), use_container_width=True, height=430)
@@ -646,7 +748,7 @@ def run_live_minute_analysis(df: pd.DataFrame):
                 {"Esito":"X","p_main":pD_L,"n_main":len(df_matched),"p_side":p_draw_side,"n_side":len(df_home_side)+len(df_away_side),"p_final":p_draw,"prior":priors["X"],"Δ":p_draw-priors["X"]},
                 {"Esito":"2","p_main":pA_L,"n_main":len(df_matched),"p_side":pA_A,"n_side":len(df_away_side),"p_final":p_away,"prior":priors["2"],"Δ":p_away-priors["2"]},
             ])
-            # Format SOLO colonne numeriche (fix per errore 'format code f' sulle stringhe)
+            # Solo colonne numeriche (evita errori di formattazione)
             num_cols = [c for c in expl.columns if pd.api.types.is_numeric_dtype(expl[c])]
             fmt = {c: "{:.3f}" for c in num_cols}
             st.dataframe(expl.style.format(fmt), use_container_width=True)
@@ -782,8 +884,10 @@ def run_live_minute_analysis(df: pd.DataFrame):
             "I **Pattern** non alterano l’EV, ma possono **pesare l’AI score** nell’EV Advisor per evidenziare opportunità coerenti."
         )
         if show_ext:
-            high_contrast = st.toggle("🌓 Contrasto alto (card chiare)", value=True)
-            show_raw = st.toggle("Mostra JSON grezzo", value=False)
+            high_contrast = st.toggle("🌓 Contrasto alto (card chiare)", value=True,
+                                      help="Mostra le card in variante ad alto contrasto (sfondo chiaro).")
+            show_raw = st.toggle("Mostra JSON grezzo", value=False,
+                                 help="Utility per debug: visualizza i dati grezzi provenienti da macros/pattern/squadre.")
             ext = get_external_signals(df_league, home_team, away_team)
             has_any = ext.get("macro_home") or ext.get("macro_away") or ext.get("pattern_signals") or ext.get("macros_bias")
             if has_any:
