@@ -1,4 +1,4 @@
-# app.py — ProTrader Hub (Campionato & Stagioni scelti in Pre-Match, fix db_label)
+# app.py — ProTrader Hub (Campionato & Stagioni scelti in Pre-Match, fix live fn name)
 from __future__ import annotations
 
 import os
@@ -63,13 +63,17 @@ _partite_del_giorno   = load_local_module("partite_del_giorno", "partite_del_gio
 _reverse_engineering  = load_local_module("reverse_engineering", "reverse_engineering.py")
 
 run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
+
+# ✅ FIX: includo sia run_live_minuto_analysis che run_live_minute_analysis
 run_live_minuto_analysis = get_callable(
     _analisi_live_minuto,
-    "run_live_minuto_analysis", "run_live_minuto", "run_live", "main",
+    "run_live_minuto_analysis", "run_live_minute_analysis",
+    "run_live_minuto", "run_live", "main",
     label="analisi_live_minuto",
 )
-run_partite_del_giorno = get_callable(_partite_del_giorno, "run_partite_del_giorno", label="partite_del_giorno")
-run_reverse_engineering = get_callable(_reverse_engineering, "run_reverse_engineering", label="reverse_engineering")
+
+run_partite_del_giorno   = get_callable(_partite_del_giorno, "run_partite_del_giorno", label="partite_del_giorno")
+run_reverse_engineering  = get_callable(_reverse_engineering, "run_reverse_engineering", label="reverse_engineering")
 
 # -------------------------------------------------------
 # Legacy opzionali dietro toggle
@@ -95,7 +99,6 @@ def _safe_to_datetime(series: pd.Series) -> pd.Series:
         return pd.to_datetime(series.astype(str), errors="coerce")
 
 def _season_sort_key(x: str) -> int:
-    """Ordina stagioni estraendo l'ANNO PIÙ RECENTE nella stringa (2024-25, 24/25, 2025…)."""
     if x is None:
         return -1
     s = str(x)
@@ -123,7 +126,7 @@ def _concat_minutes(row: pd.Series, prefixes: list[str]) -> str:
 
 # —— FILTRI GLOBALI (scelti in Pre-Match) ——
 GLOBAL_CHAMP_KEY   = "global_country"
-GLOBAL_SEASONS_KEY = "global_seasons"  # lista stagioni scelte
+GLOBAL_SEASONS_KEY = "global_seasons"
 
 def get_global_filters():
     return (
@@ -146,22 +149,18 @@ def selection_badges():
     txt_seas  = ", ".join([str(s) for s in seasons]) if seasons else "tutte le stagioni"
     st.markdown(
         f"<div style='margin:.25rem 0 .75rem 0;display:flex;gap:.5rem;flex-wrap:wrap'>"
-        f"<span style='border:1px solid #e5e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>"
-        f"{txt_champ}</span>"
-        f"<span style='border:1px solid #e5e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>"
-        f"🗓️ <b>Stagioni:</b> {txt_seas}</span>"
+        f"<span style='border:1px solid #e5e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>{txt_champ}</span>"
+        f"<span style='border:1px solid #e5e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>🗓️ <b>Stagioni:</b> {txt_seas}</span>"
         f"</div>",
         unsafe_allow_html=True
     )
 
 def _short_origin_label(s: str) -> str:
-    """Mostra 'Supabase' o il nome file, non l'URL completo."""
     if not s:
         return ""
     sl = s.lower()
     if sl.startswith("supabase"):
         return "Supabase"
-    # prova a estrarre nome file
     for sep in ("/", "\\"):
         if sep in s:
             s = s.split(sep)[-1]
@@ -178,7 +177,6 @@ st.sidebar.title("⚽ ProTrader — Hub")
 # -------------------------------------------------------
 origine_dati = st.sidebar.radio("Origine dati", ["Supabase", "Upload Manuale"], key="origine_dati")
 if origine_dati == "Supabase":
-    # ⬇️ modalità minimal: nessun selettore Campionato/Stagioni nel sidebar
     df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase", ui_mode="minimal")
 else:
     df, db_selected = load_data_from_file(ui_mode="minimal")
@@ -290,6 +288,17 @@ if "Data" in df.columns:
 # -------------------------------------------------------
 # KPI rapidi (sul dataset filtrato se già scelto)
 # -------------------------------------------------------
+def _short_origin_label(s: str) -> str:
+    if not s:
+        return ""
+    sl = s.lower()
+    if sl.startswith("supabase"):
+        return "Supabase"
+    for sep in ("/", "\\"):
+        if sep in s:
+            s = s.split(sep)[-1]
+    return s[:60]
+
 df_for_kpi = apply_global_filters(df)
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Partite DB", f"{len(df_for_kpi):,}")
@@ -297,7 +306,7 @@ if "country" in df_for_kpi.columns: c2.metric("Campionati", df_for_kpi["country"
 if "Home" in df_for_kpi.columns: c3.metric("Squadre", pd.concat([df_for_kpi["Home"], df_for_kpi["Away"]]).nunique())
 if "Stagione" in df_for_kpi.columns: c4.metric("Stagioni", df_for_kpi["Stagione"].nunique())
 
-db_short = _short_origin_label(db_selected)
+db_short = _short_origin_label(str(db_selected))
 if db_short:
     st.caption(f"Origine: **{db_short}**")
 
@@ -331,7 +340,6 @@ menu_option = st.sidebar.radio(
 def prematch_global_selector(df_base: pd.DataFrame):
     st.subheader("🎯 Selezione globale — Campionato & Stagioni")
 
-    # Campionati
     champs = sorted(df_base["country"].dropna().astype(str).unique()) if "country" in df_base.columns else []
     sel_champ = st.selectbox(
         "Campionato",
@@ -340,7 +348,6 @@ def prematch_global_selector(df_base: pd.DataFrame):
         help="Questo campionato verrà applicato a TUTTE le sezioni (Live, Giorno, Reverse)."
     ) if champs else None
 
-    # Stagioni filtrate per campionato
     df_tmp = df_base.copy()
     if sel_champ and "country" in df_tmp.columns:
         df_tmp = df_tmp[df_tmp["country"].astype(str) == str(sel_champ)]
@@ -372,22 +379,17 @@ def prematch_global_selector(df_base: pd.DataFrame):
     else:
         sel_seasons = None
 
-    # Salva in sessione
     st.session_state[GLOBAL_CHAMP_KEY] = sel_champ
     st.session_state[GLOBAL_SEASONS_KEY] = sel_seasons
 
-    # Badge di conferma
     selection_badges()
-
-    # DataFrame filtrato da passare al Pre-Match
     return apply_global_filters(df_base)
 
-# argomento "nome dataset" da passare ai moduli (usa campionato scelto, NON l'URL)
 def _db_label_for_modules() -> str:
     champ = st.session_state.get(GLOBAL_CHAMP_KEY)
     if champ:
         return str(champ)
-    return _short_origin_label(db_selected) or "Dataset"
+    return _short_origin_label(str(db_selected)) or "Dataset"
 
 # —— ROUTING ——
 if menu_option == "Pre-Match (Hub)":
@@ -415,7 +417,6 @@ elif menu_option == "🧠 Reverse Engineering EV+":
     selection_badges()
     run_reverse_engineering(apply_global_filters(df))
 
-# Legacy opzionali
 elif menu_option == "Macro Stats per Campionato" and LEGACY_OK:
     selection_badges()
     run_macro_stats(apply_global_filters(df), _db_label_for_modules())
