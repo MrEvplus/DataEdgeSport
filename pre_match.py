@@ -495,18 +495,61 @@ def _gf_ga(df, side):
     if df.empty: return (0.0, 0.0)
     return (df["Home Goal FT"].mean(), df["Away Goal FT"].mean()) if side=="Home" else (df["Away Goal FT"].mean(), df["Home Goal FT"].mean())
 
-def _shots(df, side):
-    cols = {"h_shots": "suth", "a_shots": "suta", "h_sot": "sutht", "a_sot": "sutat"}
-    for c in cols.values():
-        if c not in df.columns: df[c] = np.nan
+def _shots(df: pd.DataFrame, side: str):
+    """
+    Ritorna:
+      - shots_for / shots_against   (somme sui match)
+      - sot_for / sot_against       (somme sui match)
+      - pace_avg                    (media per match di tiri totali = for+against)
+    Supporta sia le colonne short-code (suth, suta, sutht, su tat)
+    sia eventuali etichette 'umane' se presenti.
+    """
+    # Possibili alias (primo che troviamo viene usato)
+    def pick(*names):
+        for n in names:
+            if n in df.columns:
+                return n
+        return None
+
+    h_tot  = pick("suth",  "Tiri Totali Home FT")
+    a_tot  = pick("suta",  "Tiri Totali Away FT")
+    h_sot  = pick("sutht", "Tiri in Porta Home FT")
+    a_sot  = pick("sutat", "Tiri in Porta Away FT")
+
+    # Se mancano colonne, creiamo serie vuote (NaN) così non esplodono i calcoli
+    def _series_or_nan(col):
+        if col is None or col not in df.columns:
+            return pd.Series([np.nan] * len(df), index=df.index, dtype="float")
+        # coercion robusta: gestisce stringhe, virgole, ecc.
+        s = pd.to_numeric(df[col].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+        return s
+
+    # Home / Away totali e SOT
+    H_tot  = _series_or_nan(h_tot)
+    A_tot  = _series_or_nan(a_tot)
+    H_sotS = _series_or_nan(h_sot)
+    A_sotS = _series_or_nan(a_sot)
+
+    # Dal punto di vista della squadra (side)
     if side == "Home":
-        sf, sa = df[cols["h_shots"]].astype(float), df[cols["a_shots"]].astype(float)
-        sotf, sota = df[cols["h_sot"]].astype(float), df[cols["a_sot"]].astype(float)
+        sf   = H_tot
+        sa   = A_tot
+        sotf = H_sotS
+        sota = A_sotS
     else:
-        sf, sa = df[cols["a_shots"]].astype(float), df[cols["h_shots"]].astype(float)
-        sotf, sota = df[cols["a_sot"]].astype(float), df[cols["h_sot"]].astype(float)
-    pace = np.nanmean(sf + sa)
-    return {"shots_for": np.nansum(sf), "shots_against": np.nansum(sa), "sot_for": np.nansum(sotf), "sot_against": np.nansum(sota), "pace_avg": pace}
+        sf   = A_tot
+        sa   = H_tot
+        sotf = A_sotS
+        sota = H_sotS
+
+    pace_avg = np.nanmean(sf + sa)  # media tiri totali per match
+    return {
+        "shots_for":    float(np.nansum(sf)),
+        "shots_against":float(np.nansum(sa)),
+        "sot_for":      float(np.nansum(sotf)),
+        "sot_against":  float(np.nansum(sota)),
+        "pace_avg":     float(pace_avg) if np.isfinite(pace_avg) else np.nan,
+    }
 
 def _btts_over(df):
     if df.empty: return (0.0, 0.0)
@@ -578,17 +621,54 @@ def _first_goal_tables(df, team_home, team_away):
     hist = pd.DataFrame({"Finestra": labels, "Occorrenze": [counts[l] for l in labels]})
     return {"home_first": tab_home, "away_first": tab_away, "hist": hist}
 
-def _style_rhythm_block(df, team, side):
-    df_side = _team_df(df, team, side)
-    if df_side.empty: return None
+def _style_rhythm_block(df: pd.DataFrame, team: str, side: str):
+    if side == "Home":
+        df_side = df[df["Home"].astype(str) == str(team)]
+        gf_col, ga_col = "Home Goal FT", "Away Goal FT"
+    else:
+        df_side = df[df["Away"].astype(str) == str(team)]
+        gf_col, ga_col = "Away Goal FT", "Home Goal FT"
+
+    if df_side.empty:
+        return None
+
+    # Coercion numerica sui gol
+    gf = pd.to_numeric(df_side[gf_col], errors="coerce").fillna(0)
+    ga = pd.to_numeric(df_side[ga_col], errors="coerce").fillna(0)
+
     shots = _shots(df_side, side)
-    gf_sum = df_side["Home Goal FT"].sum() if side=="Home" else df_side["Away Goal FT"].sum()
-    ga_sum = df_side["Away Goal FT"].sum() if side=="Home" else df_side["Home Goal FT"].sum()
-    conv = np.nan if not (shots["sot_for"] and shots["sot_for"]>0) else gf_sum / shots["sot_for"]
-    savep = np.nan if not (shots["sot_against"] and shots["sot_against"]>0) else 1.0 - (ga_sum / shots["sot_against"])
-    n = len(df_side); pace_pm = shots["shots_for"] + shots["shots_against"]; pace_pm = (pace_pm/n) if n>0 else np.nan
-    btts, over25 = _btts_over(df_side)
-    return {"pace": pace_pm, "conv": conv, "save": savep, "btts": btts, "over25": over25, "n": n}
+
+    # Conversione: gol / SOT (solo se SOT>0)
+    sot_for = shots["sot_for"]
+    conv = np.nan
+    if sot_for and sot_for > 0:
+        conv = float(gf.sum()) / float(sot_for)
+
+    # Save% approx: 1 - gol subiti / SOT contro (solo se SOT contro >0)
+    sot_ag = shots["sot_against"]
+    savep = np.nan
+    if sot_ag and sot_ag > 0:
+        savep = 1.0 - (float(ga.sum()) / float(sot_ag))
+
+    n = int(len(df_side))
+    # Pace per match: media tiri totali (for+against)
+    pace_pm = shots["pace_avg"]
+
+    # BTTS / Over 2.5 (percentuali)
+    btts = ((pd.to_numeric(df_side["Home Goal FT"], errors="coerce") > 0) &
+            (pd.to_numeric(df_side["Away Goal FT"], errors="coerce") > 0)).mean()
+    over25 = ((pd.to_numeric(df_side["Home Goal FT"], errors="coerce") +
+               pd.to_numeric(df_side["Away Goal FT"], errors="coerce")) > 2.5).mean()
+
+    return {
+        "pace": pace_pm,                     # tiri totali per match
+        "conv": conv,                        # frazione (es. 0.25 → 25%)
+        "save": savep,                       # frazione (es. 0.70 → 70%)
+        "btts": float(0 if np.isnan(btts) else btts),
+        "over25": float(0 if np.isnan(over25) else over25),
+        "n": n,
+    }
+
 
 def _calibration_one(df, market: str, k_bins=5):
     col_map = {"Home": "Odd home", "Draw": "Odd Draw", "Away": "Odd Away"}
