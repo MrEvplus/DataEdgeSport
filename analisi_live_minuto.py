@@ -1084,3 +1084,20 @@ def run_live_minute_analysis(df: pd.DataFrame):
                 st.caption("Nessun segnale esterno disponibile.")
         else:
             st.caption("Segnali esterni disattivati nel Setup.")
+
+# ---- Alias di compatibilità con app.py / pre_match.py ----
+def run_live_minuto_analysis(df: pd.DataFrame):
+    """Alias retrocompatibile."""
+    return run_live_minute_analysis(df)
+
+def run_live_minuto(df: pd.DataFrame):
+    """Alias retrocompatibile."""
+    return run_live_minute_analysis(df)
+
+def run_live(df: pd.DataFrame):
+    """Alias retrocompatibile."""
+    return run_live_minute_analysis(df)
+
+def main(df: pd.DataFrame):
+    """Alias retrocompatibile."""
+    return run_live_minute_analysis(df)
