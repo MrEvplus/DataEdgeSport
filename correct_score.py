@@ -1,43 +1,206 @@
-# correct_score.py
-# ------------------------------------------------------------
-# Correct Score Prediction con Poisson + Dixon-Coles
-# + Calibrazione automatica dei parametri su storico di lega:
-#   - rho (Dixon-Coles)
-#   - kappa (shrinkage verso media di lega)
-#   - recent_weight (peso forma recente) e recent_n
-# ------------------------------------------------------------
-
+# correct_score.py — pannello Correct Score (Poisson + Dixon–Coles) con parametri salvati per lega
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
 import numpy as np
 import pandas as pd
+import streamlit as st
+import altair as alt
 
-# Streamlit/Altair opzionali: import condizionale
+# Persisitenza parametri CS per lega
+from cs_prefs import get_params as cs_get, save_params as cs_save
+
+
+# =========================
+# Altair theme (dark friendly)
+# =========================
+def _alt_theme():
+    return {
+        "config": {
+            "view": {"stroke": "transparent"},
+            "axis": {"labelFontSize": 12, "titleFontSize": 12, "gridColor": "#223", "labelColor": "#e5e7eb", "titleColor": "#cbd5e1"},
+            "legend": {"labelFontSize": 12, "titleFontSize": 12, "labelColor": "#e5e7eb", "titleColor": "#cbd5e1"},
+            "title": {"fontSize": 14, "color": "#e5e7eb"},
+            "background": "transparent",
+        }
+    }
 try:
-    import streamlit as st
-    import altair as alt
-except Exception:  # pragma: no cover
-    st = None
-    alt = None
+    alt.themes.register("app_theme_cs", _alt_theme)
+    alt.themes.enable("app_theme_cs")
+except Exception:
+    pass
 
 
-# ===========================
-# Utility numeriche
-# ===========================
-def _poisson_pmf(mu: float, k: int) -> float:
-    if mu <= 0:
-        return 1.0 if k == 0 else 0.0
-    return math.exp(-mu + k * math.log(mu) - math.lgamma(k + 1))
+# =========================
+# Utils
+# =========================
+def _to_num(s: pd.Series) -> pd.Series:
+    if s is None:
+        return pd.Series(dtype="float")
+    return pd.to_numeric(s.astype(str).str.replace(",", ".", regex=False), errors="coerce")
 
 
-def _dixon_coles_tau(x: int, y: int, lam_home: float, lam_away: float, rho: float) -> float:
-    """Correzione Dixon-Coles per celle a bassa segnatura."""
-    if rho == 0:
-        return 1.0
+def _last_n(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    if not n or n <= 0 or "Data" not in df.columns:
+        return df
+    tmp = df.copy()
+    tmp["_d"] = pd.to_datetime(tmp["Data"], errors="coerce")
+    tmp = tmp.sort_values("_d", ascending=False).drop(columns=["_d"])
+    return tmp.head(n)
+
+
+def _league_avgs(df_league: pd.DataFrame) -> Tuple[float, float]:
+    """Media di lega per GF home e GF away."""
+    hg = _to_num(df_league.get("Home Goal FT")).fillna(0)
+    ag = _to_num(df_league.get("Away Goal FT")).fillna(0)
+    if len(hg) == 0:
+        return 1.2, 1.2
+    return float(hg.mean()), float(ag.mean())
+
+
+@dataclass
+class XG:
+    home: float
+    away: float
+
+
+# =========================
+# Stima λ con shrink (attack/def multipliers) + forma recente
+# =========================
+def _team_ctx(df: pd.DataFrame, team: str, venue: str) -> pd.DataFrame:
+    if venue == "Home":
+        return df[df["Home"].astype(str) == str(team)]
+    return df[df["Away"].astype(str) == str(team)]
+
+
+def _safemean(s: pd.Series, default: float = 0.0) -> float:
+    s = _to_num(s)
+    return float(s.mean()) if len(s) else float(default)
+
+
+def _attack_def_multipliers(
+    df_team: pd.DataFrame,
+    venue: str,
+    league_home_avg: float,
+    league_away_avg: float,
+) -> Tuple[float, float, int]:
+    """
+    Ritorna (attack_mult, defense_mult, n_partite)
+    - attack_mult è rispetto alla media di lega corretta per venue
+    - defense_mult usa la media dell'avversario in quel venue (es. difesa Away confrontata con gol Home di lega)
+    """
+    n = len(df_team)
+    if n == 0:
+        return 1.0, 1.0, 0
+
+    if venue == "Home":
+        gf = _safemean(df_team.get("Home Goal FT"), 0.0)  # segnati da Home
+        ga = _safemean(df_team.get("Away Goal FT"), 0.0)  # subiti da Home
+        atk = (gf / league_home_avg) if league_home_avg > 0 else 1.0
+        dfn = (ga / league_away_avg) if league_away_avg > 0 else 1.0
+    else:
+        gf = _safemean(df_team.get("Away Goal FT"), 0.0)  # segnati da Away
+        ga = _safemean(df_team.get("Home Goal FT"), 0.0)  # subiti da Away
+        atk = (gf / league_away_avg) if league_away_avg > 0 else 1.0
+        dfn = (ga / league_home_avg) if league_home_avg > 0 else 1.0
+
+    # bound morbidi per evitare estremi
+    atk = float(np.clip(atk, 0.4, 2.5))
+    dfn = float(np.clip(dfn, 0.4, 2.5))
+    return atk, dfn, n
+
+
+def _shrink_to_one(mult: float, n: int, kappa: float) -> float:
+    """
+    Shrink verso 1 con forza kappa (interpreta kappa come 'match equivalenti' in prior).
+    """
+    k = max(0.0, float(kappa))
+    return float((k * 1.0 + n * mult) / (k + n)) if (k + n) > 0 else 1.0
+
+
+def _blend_recent(base_mult: float, recent_mult: float, weight_recent: float) -> float:
+    w = float(np.clip(weight_recent, 0.0, 1.0))
+    return float((1.0 - w) * base_mult + w * recent_mult)
+
+
+def estimate_expected_goals(
+    df: pd.DataFrame,
+    league: str,
+    home_team: str,
+    away_team: str,
+    seasons: Optional[list[str]] = None,
+    kappa: float = 3.0,
+    recent_weight: float = 0.25,
+    recent_n: int = 6,
+) -> XG:
+    """
+    Calcola λ_home e λ_away con:
+      - moltiplicatori attacco/difesa rispetto alla media di lega
+      - shrink verso 1 con forza kappa
+      - blend con forma recente (ultime N gare, weight recent_weight)
+    """
+    d = df.copy()
+
+    if "country" in d.columns:
+        d = d[d["country"].astype(str).str.upper() == str(league).upper()]
+
+    if seasons:
+        d = d[d["Stagione"].astype(str).isin([str(s) for s in seasons])]
+
+    # media di lega
+    league_home_avg, league_away_avg = _league_avgs(d)
+
+    # contesti pieni
+    df_home_ctx = _team_ctx(d, home_team, "Home")
+    df_away_ctx = _team_ctx(d, away_team, "Away")
+
+    # forma recente
+    df_home_recent = _last_n(df_home_ctx, int(recent_n))
+    df_away_recent = _last_n(df_away_ctx, int(recent_n))
+
+    # moltiplicatori base
+    atkH, defH, nH = _attack_def_multipliers(df_home_ctx, "Home", league_home_avg, league_away_avg)
+    atkA, defA, nA = _attack_def_multipliers(df_away_ctx, "Away", league_home_avg, league_away_avg)
+
+    # moltiplicatori recenti
+    atkH_r, defH_r, nH_r = _attack_def_multipliers(df_home_recent, "Home", league_home_avg, league_away_avg)
+    atkA_r, defA_r, nA_r = _attack_def_multipliers(df_away_recent, "Away", league_home_avg, league_away_avg)
+
+    # shrink verso 1
+    atkH_s = _shrink_to_one(atkH, nH, kappa=kappa)
+    defH_s = _shrink_to_one(defH, nH, kappa=kappa)
+    atkA_s = _shrink_to_one(atkA, nA, kappa=kappa)
+    defA_s = _shrink_to_one(defA, nA, kappa=kappa)
+
+    atkH_r_s = _shrink_to_one(atkH_r, nH_r, kappa=kappa)
+    defH_r_s = _shrink_to_one(defH_r, nH_r, kappa=kappa)
+    atkA_r_s = _shrink_to_one(atkA_r, nA_r, kappa=kappa)
+    defA_r_s = _shrink_to_one(defA_r, nA_r, kappa=kappa)
+
+    # blend con forma recente
+    atkH_b = _blend_recent(atkH_s, atkH_r_s, recent_weight)
+    defH_b = _blend_recent(defH_s, defH_r_s, recent_weight)
+    atkA_b = _blend_recent(atkA_s, atkA_r_s, recent_weight)
+    defA_b = _blend_recent(defA_s, defA_r_s, recent_weight)
+
+    # λ finali
+    lam_home = float(np.clip(league_home_avg * atkH_b * defA_b, 0.05, 6.0))
+    lam_away = float(np.clip(league_away_avg * atkA_b * defH_b, 0.05, 6.0))
+
+    return XG(home=lam_home, away=lam_away)
+
+
+# =========================
+# Dixon–Coles correction
+# =========================
+def _dc_tau(x: int, y: int, lam_home: float, lam_away: float, rho: float) -> float:
+    """
+    Correzione di Dixon–Coles per risultati a basso punteggio.
+    Riferimento pratico: τ(0,0)=1-λhλaρ; τ(0,1)=1+λhρ; τ(1,0)=1+λaρ; τ(1,1)=1-ρ; altrimenti 1.
+    """
     if x == 0 and y == 0:
         return 1.0 - lam_home * lam_away * rho
     if x == 0 and y == 1:
@@ -49,471 +212,211 @@ def _dixon_coles_tau(x: int, y: int, lam_home: float, lam_away: float, rho: floa
     return 1.0
 
 
-def _safe_mean(a: Iterable[float]) -> float:
-    a = list(a)
-    return float(np.nanmean(a)) if len(a) > 0 else 0.0
+def correct_score_matrix(lam_home: float, lam_away: float, rho: float = -0.05, max_goals: int = 6) -> np.ndarray:
+    """
+    Genera matrice P(X=x, Y=y) con Poisson indipendenti corretti da Dixon–Coles.
+    Rinormalizza per sommare a 1.
+    """
+    mx = int(max(1, int(max_goals)))
+    xs = np.arange(0, mx + 1)
+    ys = np.arange(0, mx + 1)
 
+    # Poisson pmf
+    px = np.exp(-lam_home) * np.power(lam_home, xs) / np.array([math.factorial(i) for i in xs], dtype=float)
+    py = np.exp(-lam_away) * np.power(lam_away, ys) / np.array([math.factorial(i) for i in ys], dtype=float)
 
-def _shrink_mean(sum_vals: float, n: int, league_mean: float, kappa: float) -> float:
-    """mean* = (sum + kappa * league_mean) / (n + kappa)"""
-    n = max(int(n), 0)
-    return (sum_vals + kappa * league_mean) / (n + kappa) if (n + kappa) > 0 else league_mean
-
-
-# ===========================
-# Estrazione statistiche base
-# ===========================
-@dataclass
-class LeagueAverages:
-    home_goals: float
-    away_goals: float
-
-
-def _league_averages(df: pd.DataFrame) -> LeagueAverages:
-    hg = pd.to_numeric(df["Home Goal FT"], errors="coerce")
-    ag = pd.to_numeric(df["Away Goal FT"], errors="coerce")
-    return LeagueAverages(home_goals=float(hg.mean(skipna=True)), away_goals=float(ag.mean(skipna=True)))
-
-
-@dataclass
-class TeamContextStats:
-    n: int
-    scored_mean: float
-    conceded_mean: float
-    scored_sum: float
-    conceded_sum: float
-
-
-def _team_context_stats(df: pd.DataFrame, team: str, venue: str) -> TeamContextStats:
-    if venue == "Home":
-        d = df[df["Home"].astype("string") == team]
-        scored = pd.to_numeric(d["Home Goal FT"], errors="coerce").fillna(0)
-        conceded = pd.to_numeric(d["Away Goal FT"], errors="coerce").fillna(0)
-    else:
-        d = df[df["Away"].astype("string") == team]
-        scored = pd.to_numeric(d["Away Goal FT"], errors="coerce").fillna(0)
-        conceded = pd.to_numeric(d["Home Goal FT"], errors="coerce").fillna(0)
-
-    return TeamContextStats(
-        n=int(len(d)),
-        scored_mean=float(scored.mean()) if len(d) else 0.0,
-        conceded_mean=float(conceded.mean()) if len(d) else 0.0,
-        scored_sum=float(scored.sum()),
-        conceded_sum=float(conceded.sum()),
-    )
-
-
-def _recent_context_stats(df: pd.DataFrame, team: str, venue: str, last_n: int = 6) -> TeamContextStats:
-    if venue == "Home":
-        d = df[df["Home"].astype("string") == team].copy()
-        sc_col, cc_col = "Home Goal FT", "Away Goal FT"
-    else:
-        d = df[df["Away"].astype("string") == team].copy()
-        sc_col, cc_col = "Away Goal FT", "Home Goal FT"
-
-    if "Data" in d.columns:
-        d["_d_"] = pd.to_datetime(d["Data"], errors="coerce")
-        d = d.sort_values("_d_", ascending=False).drop(columns=["_d_"])
-
-    d = d.head(int(last_n))
-    scored = pd.to_numeric(d[sc_col], errors="coerce").fillna(0)
-    conceded = pd.to_numeric(d[cc_col], errors="coerce").fillna(0)
-
-    return TeamContextStats(
-        n=int(len(d)),
-        scored_mean=float(scored.mean()) if len(d) else 0.0,
-        conceded_mean=float(conceded.mean()) if len(d) else 0.0,
-        scored_sum=float(scored.sum()),
-        conceded_sum=float(conceded.sum()),
-    )
-
-
-# ===========================
-# Stima λ attesi
-# ===========================
-@dataclass
-class ExpectedGoals:
-    home: float
-    away: float
-
-
-def estimate_expected_goals(
-    df: pd.DataFrame,
-    league: str,
-    home_team: str,
-    away_team: str,
-    seasons: Optional[Iterable[str]] = None,
-    kappa: float = 3.0,
-    recent_weight: float = 0.25,
-    recent_n: int = 6,
-) -> ExpectedGoals:
-    df = df.copy()
-    df["country"] = df["country"].astype("string").str.upper().str.strip()
-    league_code = (league or "").upper().strip()
-    df = df[df["country"] == league_code]
-
-    if seasons is not None and "Stagione" in df.columns:
-        seasons = [str(s) for s in seasons]
-        df = df[df["Stagione"].astype("string").isin(seasons)]
-
-    if df.empty:
-        return ExpectedGoals(home=1.2, away=1.0)
-
-    L = _league_averages(df)
-
-    h_home = _team_context_stats(df, home_team, "Home")
-    a_away = _team_context_stats(df, away_team, "Away")
-
-    home_sc_rate = _shrink_mean(h_home.scored_sum, h_home.n, L.home_goals, kappa)
-    home_cc_rate = _shrink_mean(h_home.conceded_sum, h_home.n, L.away_goals, kappa)
-    away_sc_rate = _shrink_mean(a_away.scored_sum, a_away.n, L.away_goals, kappa)
-    away_cc_rate = _shrink_mean(a_away.conceded_sum, a_away.n, L.home_goals, kappa)
-
-    home_attack = home_sc_rate / max(L.home_goals, 1e-9)
-    away_defence = away_cc_rate / max(L.home_goals, 1e-9)
-    away_attack = away_sc_rate / max(L.away_goals, 1e-9)
-    home_defence = home_cc_rate / max(L.away_goals, 1e-9)
-
-    lam_home_base = L.home_goals * home_attack * away_defence
-    lam_away_base = L.away_goals * away_attack * home_defence
-
-    if recent_weight > 0:
-        h_recent = _recent_context_stats(df, home_team, "Home", last_n=recent_n)
-        a_recent = _recent_context_stats(df, away_team, "Away", last_n=recent_n)
-
-        h_att_r = h_recent.scored_mean / max(L.home_goals, 1e-9) if h_recent.n > 0 else home_attack
-        a_def_r = a_recent.conceded_mean / max(L.home_goals, 1e-9) if a_recent.n > 0 else away_defence
-
-        a_att_r = a_recent.scored_mean / max(L.away_goals, 1e-9) if a_recent.n > 0 else away_attack
-        h_def_r = h_recent.conceded_mean / max(L.away_goals, 1e-9) if h_recent.n > 0 else home_defence
-
-        lam_h_r = L.home_goals * h_att_r * a_def_r
-        lam_a_r = L.away_goals * a_att_r * h_def_r
-
-        lam_home = (1 - recent_weight) * lam_home_base + recent_weight * lam_h_r
-        lam_away = (1 - recent_weight) * lam_away_base + recent_weight * lam_a_r
-    else:
-        lam_home, lam_away = lam_home_base, lam_away_base
-
-    lam_home = float(np.clip(lam_home, 0.05, 6.0))
-    lam_away = float(np.clip(lam_away, 0.05, 6.0))
-    return ExpectedGoals(home=lam_home, away=lam_away)
-
-
-# ===========================
-# Matrice punteggi esatti
-# ===========================
-@dataclass
-class ScoreGrid:
-    matrix: pd.DataFrame
-    home_lambda: float
-    away_lambda: float
-    rho: float
-    max_goals: int
-
-
-def correct_score_matrix(lam_home: float, lam_away: float, rho: float = -0.05, max_goals: int = 6) -> ScoreGrid:
-    max_goals = int(max(1, max_goals))
-    px = np.array([_poisson_pmf(lam_home, k) for k in range(max_goals + 1)], dtype=float)
-    py = np.array([_poisson_pmf(lam_away, k) for k in range(max_goals + 1)], dtype=float)
     mat = np.outer(px, py)
-    for x in (0, 1):
-        for y in (0, 1):
-            mat[x, y] *= _dixon_coles_tau(x, y, lam_home, lam_away, rho)
+
+    # DC correction on low scores
+    R = float(rho)
+    for x in range(0, min(2, mx) + 1):
+        for y in range(0, min(2, mx) + 1):
+            mat[x, y] *= _dc_tau(x, y, lam_home, lam_away, R)
+
+    # Rinormalizza
     s = mat.sum()
     if s > 0:
         mat = mat / s
-    df = pd.DataFrame(mat, index=[f"H{x}" for x in range(max_goals + 1)],
-                      columns=[f"A{y}" for y in range(max_goals + 1)])
-    return ScoreGrid(matrix=df, home_lambda=lam_home, away_lambda=lam_away, rho=rho, max_goals=max_goals)
+    return mat
 
 
-# ===========================
-# Helper punteggi
-# ===========================
-def top_correct_scores(grid: ScoreGrid, top_n: int = 10) -> List[Tuple[str, float, float]]:
-    mat = grid.matrix.values
-    out = []
-    for i in range(mat.shape[0]):
-        for j in range(mat.shape[1]):
-            p = float(mat[i, j])
-            out.append((f"{i}-{j}", p, (1.0 / p) if p > 0 else float("inf")))
-    out.sort(key=lambda x: x[1], reverse=True)
-    return out[:top_n]
+# =========================
+# Derivati dalla matrice CS
+# =========================
+def _derived_from_matrix(pmat: np.ndarray) -> Dict[str, Any]:
+    gmax = pmat.shape[0] - 1
+    # 1X2
+    p_home = float(np.tril(pmat, -1).sum())  # x>y
+    p_draw = float(np.trace(pmat))
+    p_away = float(np.triu(pmat, 1).sum())   # y>x
+
+    # Over/Under 2.5
+    over25 = 0.0
+    for x in range(gmax + 1):
+        for y in range(gmax + 1):
+            if (x + y) > 2.5:
+                over25 += float(pmat[x, y])
+    under25 = 1.0 - over25
+
+    # BTTS
+    btts = float(pmat[1:, 1:].sum())
+    nobtts = 1.0 - btts
+
+    return {
+        "1": p_home, "X": p_draw, "2": p_away,
+        "Over2.5": over25, "Under2.5": under25,
+        "BTTS": btts, "NoBTTS": nobtts,
+    }
 
 
-def market_ev_for_scores(grid: ScoreGrid, market_prices: Dict[str, float], commission: float = 0.0) -> pd.DataFrame:
+def _top_scorelines(pmat: np.ndarray, topn: int = 10) -> pd.DataFrame:
+    gmax = pmat.shape[0] - 1
     rows = []
-    for s, price in market_prices.items():
-        try:
-            h, a = s.split("-"); h = int(h); a = int(a)
-        except Exception:
-            continue
-        if h <= grid.max_goals and a <= grid.max_goals:
-            p = float(grid.matrix.values[h, a])
-            ev = price * p * (1 - commission) - 1
-            rows.append({"Score": s, "Prob %": round(p * 100, 2), "Quota": price, "EV": round(ev, 3)})
-    df = pd.DataFrame(rows).sort_values("EV", ascending=False)
+    for i in range(gmax + 1):
+        for j in range(gmax + 1):
+            rows.append({"Score": f"{i}-{j}", "Prob %": 100 * float(pmat[i, j])})
+    df = pd.DataFrame(rows).sort_values("Prob %", ascending=False).head(int(topn))
+    df["Prob %"] = df["Prob %"].map(lambda v: round(v, 2))
     return df.reset_index(drop=True)
 
 
-# ===========================
-# Calibrazione automatica parametri
-# ===========================
-def _score_prob(hg: int, ag: int, lam_h: float, lam_a: float, rho: float) -> float:
-    """Probabilità del punteggio osservato (hg, ag) con DC correction."""
-    p = _poisson_pmf(lam_h, hg) * _poisson_pmf(lam_a, ag)
-    if (hg in (0, 1)) and (ag in (0, 1)):
-        p *= _dixon_coles_tau(hg, ag, lam_h, lam_a, rho)
-    return max(p, 1e-12)
+# =========================
+# UI helpers
+# =========================
+def _num(v: float, pct: bool = False) -> str:
+    if pct:
+        return f"{v*100:.1f}%"
+    return f"{v:.2f}"
 
 
-def _prepare_league(df: pd.DataFrame, league_code: str, seasons: Optional[Iterable[str]] = None) -> pd.DataFrame:
-    d = df.copy()
-    d["country"] = d["country"].astype("string").str.upper().str.strip()
-    d = d[d["country"] == (league_code or "").upper().strip()]
-    if seasons is not None and "Stagione" in d.columns:
-        seasons = [str(s) for s in seasons]
-        d = d[d["Stagione"].astype("string").isin(seasons)]
-    # ordina cronologicamente se possibile
-    if "Data" in d.columns:
-        d["_d_"] = pd.to_datetime(d["Data"], errors="coerce")
-        d = d.sort_values("_d_").drop(columns=["_d_"])
-    return d.reset_index(drop=True)
+def _prob_card(title: str, value: float):
+    st.metric(label=title, value=_num(value, pct=True))
 
 
-def _rolling_nll_for_grid(
-    df_league: pd.DataFrame,
-    kappa: float,
-    recent_weight: float,
-    recent_n: int,
-    rho: float,
-    warmup: int = 80,
-    step: int = 2,
-    max_eval: int = 800,
-) -> Tuple[float, int]:
-    """
-    Negative Log-Likelihood "rolling": per ogni match i usa solo le partite precedenti.
-    Ritorna (NLL aggregata, numero match valutati).
-    """
-    n = len(df_league)
-    if n <= warmup + 5:
-        return float("inf"), 0
+def _render_heatmap(pmat: np.ndarray, home: str, away: str):
+    gmax = pmat.shape[0] - 1
+    data = []
+    for i in range(gmax + 1):
+        for j in range(gmax + 1):
+            data.append({"Home": i, "Away": j, "Prob": 100 * float(pmat[i, j])})
+    dfh = pd.DataFrame(data)
 
-    nll = 0.0
-    evaluated = 0
-
-    # per risparmiare, limitiamo #valutazioni
-    end = n
-    start = min(warmup, n - 1)
-    idxs = list(range(start, end, max(1, step)))[:max_eval]
-
-    for i in idxs:
-        row = df_league.iloc[i]
-        hg = row.get("Home Goal FT", np.nan); ag = row.get("Away Goal FT", np.nan)
-        if pd.isna(hg) or pd.isna(ag):
-            continue
-        hg = int(hg); ag = int(ag)
-
-        # dataset passato (niente look-ahead)
-        past = df_league.iloc[:i].copy()
-        home = str(row["Home"]); away = str(row["Away"])
-
-        xg = estimate_expected_goals(
-            df=past,
-            league=str(row["country"]),
-            home_team=home,
-            away_team=away,
-            seasons=None,  # già filtrato
-            kappa=float(kappa),
-            recent_weight=float(recent_weight),
-            recent_n=int(recent_n),
+    ch = (
+        alt.Chart(dfh)
+        .mark_rect()
+        .encode(
+            x=alt.X("Away:O", title=f"{away} goals"),
+            y=alt.Y("Home:O", title=f"{home} goals"),
+            color=alt.Color("Prob:Q", title="%", scale=alt.Scale(scheme="blues")),
+            tooltip=[alt.Tooltip("Home:Q"), alt.Tooltip("Away:Q"), alt.Tooltip("Prob:Q", format=".2f")],
         )
-        p = _score_prob(hg, ag, xg.home, xg.away, float(rho))
-        nll += -math.log(p)
-        evaluated += 1
-
-    return (nll, evaluated)
+        .properties(height=360, width="container", title="Correct Score – Heatmap (%)")
+    )
+    st.altair_chart(ch, use_container_width=True)
 
 
-def recommend_dc_params(
-    df: pd.DataFrame,
-    league_code: str,
-    seasons: Optional[Iterable[str]] = None,
-    *,
-    kappa_grid: Iterable[float] = (1.5, 3.0, 4.5, 6.0, 8.0),
-    recent_w_grid: Iterable[float] = (0.0, 0.15, 0.25, 0.35),
-    recent_n_grid: Iterable[int] = (4, 6, 8),
-    rho_grid: Iterable[float] = (-0.12, -0.08, -0.05, -0.02, 0.00, 0.03),
-    warmup: int = 80,
-    step: int = 2,
-    max_eval: int = 800,
-) -> Dict[str, float]:
-    """
-    Cerca i parametri che minimizzano la Negative Log-Likelihood rolling.
-    Ritorna un dizionario con i valori consigliati.
-    """
-    d = _prepare_league(df, league_code, seasons)
-    if len(d) < warmup + 10:
-        # poco storico: suggerimenti prudenti
-        return {"rho": -0.05, "kappa": 3.0, "recent_weight": 0.25, "recent_n": 6, "evaluated": 0, "nll_per_match": np.nan}
-
-    best = {"nll": float("inf"), "evaluated": 0, "rho": -0.05, "kappa": 3.0, "recent_weight": 0.25, "recent_n": 6}
-
-    # griglia
-    for kappa in kappa_grid:
-        for rw in recent_w_grid:
-            for rn in recent_n_grid:
-                for rho in rho_grid:
-                    nll, ev = _rolling_nll_for_grid(d, kappa, rw, rn, rho, warmup=warmup, step=step, max_eval=max_eval)
-                    if ev == 0:
-                        continue
-                    if nll < best["nll"]:
-                        best.update({"nll": nll, "evaluated": ev, "rho": rho, "kappa": kappa, "recent_weight": rw, "recent_n": rn})
-
-    if best["evaluated"] > 0:
-        best["nll_per_match"] = round(best["nll"] / best["evaluated"], 6)
-    else:
-        best["nll_per_match"] = np.nan
-    return {k: best[k] for k in ("rho", "kappa", "recent_weight", "recent_n", "evaluated", "nll_per_match")}
-
-
-# ===========================
-# Pannello Streamlit (UI)
-# ===========================
+# =========================
+# Entry point
+# =========================
 def run_correct_score_panel(
     df: pd.DataFrame,
     league_code: str,
     home_team: str,
     away_team: str,
-    seasons: Optional[Iterable[str]] = None,
+    seasons: Optional[list[str]] = None,
     default_rho: float = -0.05,
     default_kappa: float = 3.0,
     default_recent_weight: float = 0.25,
     default_recent_n: int = 6,
     default_max_goals: int = 6,
 ):
-    if st is None:
-        raise RuntimeError("Streamlit non disponibile in questo ambiente.")
+    st.markdown("### 🎯 Correct Score — Poisson + Dixon–Coles")
 
-    st.subheader("🎯 Correct Score Prediction (Poisson + Dixon–Coles)")
+    # Parametri salvati per lega
+    prefs = cs_get(league_code) if league_code else {}
+    rho_init = float(prefs.get("rho", default_rho))
+    kappa_init = float(prefs.get("kappa", default_kappa))
+    r_w_init = float(prefs.get("recent_weight", default_recent_weight))
+    r_n_init = int(prefs.get("recent_n", default_recent_n))
+    gmax_init = int(prefs.get("max_goals", default_max_goals))
 
     with st.expander("Parametri modello", expanded=True):
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
-            rho = st.number_input("Rho (Dixon-Coles)", key="cs_rho", value=float(default_rho),
-                                  step=0.01, min_value=-0.5, max_value=0.5)
+            rho = st.number_input("Rho (Dixon-Coles)", value=rho_init, step=0.01, min_value=-0.5, max_value=0.5, key="cs_rho")
         with c2:
-            kappa = st.number_input("Kappa shrinkage", key="cs_kappa", value=float(default_kappa),
-                                    step=0.5, min_value=0.0, max_value=50.0)
+            kappa = st.number_input("Kappa (shrink)", value=kappa_init, step=0.1, min_value=0.0, max_value=50.0, key="cs_kappa")
         with c3:
-            recent_w = st.slider("Peso forma recente", key="cs_recent_w",
-                                 min_value=0.0, max_value=1.0, value=float(default_recent_weight))
+            recent_weight = st.slider("Peso forma recente", 0.0, 1.0, r_w_init, 0.05, key="cs_recent_w")
         with c4:
-            recent_n = st.number_input("N partite recenti", key="cs_recent_n",
-                                       value=int(default_recent_n), min_value=1, step=1)
+            recent_n = st.slider("N gare recenti", 0, 20, r_n_init, 1, key="cs_recent_n")
         with c5:
-            gmax = st.number_input("Max gol tabella", key="cs_gmax",
-                                   value=int(default_max_goals), min_value=3, max_value=10, step=1)
+            max_goals = st.slider("Max goals", 4, 10, gmax_init, 1, key="cs_gmax")
 
-    # ---- SUGGERITORE PARAMETRI SU STORICO
-    with st.expander("🧪 Suggerisci parametri dai dati di lega", expanded=False):
-        st.caption("Calibrazione rolling su storico della lega: minimizza la verosimiglianza del punteggio esatto (no look-ahead).")
-        colb1, colb2, colb3 = st.columns([1, 1, 2])
-        with colb1:
-            warmup = st.number_input("Warmup iniziale", value=80, min_value=40, step=10, help="Numero di match iniziali ignorati per stimare i tassi.")
-        with colb2:
-            max_eval = st.number_input("Max valutazioni", value=800, min_value=200, step=100, help="Per contenere i tempi.")
-        with colb3:
-            step = st.slider("Step (salta match)", min_value=1, max_value=5, value=2, help="1 = valuta tutti i match (più lento)")
+        if st.button("💾 Salva impostazioni per questa lega", use_container_width=True):
+            cs_save(league_code, {
+                "rho": float(rho),
+                "kappa": float(kappa),
+                "recent_weight": float(recent_weight),
+                "recent_n": int(recent_n),
+                "max_goals": int(max_goals),
+            })
+            st.success("Parametri salvati per la lega.")
 
-        if st.button("🔎 Calcola parametri consigliati", use_container_width=True):
-            with st.spinner("Calibrazione in corso..."):
-                # facciamo una cache semplice per non ripetere calcoli identici
-                @st.cache_data(show_spinner=False)
-                def _cached_reco(_df, _league, _seasons, _warmup, _step, _max_eval):
-                    return recommend_dc_params(_df, _league, _seasons, warmup=_warmup, step=_step, max_eval=_max_eval)
-                rec = _cached_reco(df, league_code, seasons, warmup, step, max_eval)
+    # Stima λ
+    with st.spinner("Calcolo attacchi/difese e λ attesi…"):
+        xg = estimate_expected_goals(
+            df=df,
+            league=league_code,
+            home_team=home_team,
+            away_team=away_team,
+            seasons=seasons,
+            kappa=float(kappa),
+            recent_weight=float(recent_weight),
+            recent_n=int(recent_n),
+        )
 
-            st.success(f"Consigliato → ρ: **{rec['rho']}**, κ: **{rec['kappa']}**, "
-                       f"peso recente: **{rec['recent_weight']}**, N recente: **{rec['recent_n']}** "
-                       f"(eval: {rec['evaluated']} match, NLL/match: {rec['nll_per_match']})")
+    st.caption(f"λ stimati — **{home_team}**: {xg.home:.2f} | **{away_team}**: {xg.away:.2f}")
 
-            apply = st.checkbox("Applica questi valori ai controlli", value=True)
-            if apply:
-                st.session_state["cs_rho"] = float(rec["rho"])
-                st.session_state["cs_kappa"] = float(rec["kappa"])
-                st.session_state["cs_recent_w"] = float(rec["recent_weight"])
-                st.session_state["cs_recent_n"] = int(rec["recent_n"])
-                st.info("Parametri applicati. Puoi ricalcolare la matrice con i nuovi valori.")
+    # Matrice Correct Score
+    pmat = correct_score_matrix(xg.home, xg.away, rho=float(rho), max_goals=int(max_goals))
 
-    # ---- Stima λ e matrice
-    xg = estimate_expected_goals(
-        df=df,
-        league=league_code,
-        home_team=home_team,
-        away_team=away_team,
-        seasons=seasons,
-        kappa=float(st.session_state.get("cs_kappa", kappa)),
-        recent_weight=float(st.session_state.get("cs_recent_w", recent_w)),
-        recent_n=int(st.session_state.get("cs_recent_n", recent_n)),
+    # Heatmap + Top scoreline
+    _render_heatmap(pmat, home_team, away_team)
+
+    st.subheader("Top correct score")
+    topn = st.slider("Visualizza i primi N punteggi", 5, 20, 10, 1, key="cs_topn")
+    df_top = _top_scorelines(pmat, topn)
+    st.dataframe(
+        df_top,
+        use_container_width=True,
+        height=36 + 28 * min(len(df_top), 12),
+        column_config={"Prob %": st.column_config.NumberColumn(format="%.2f")},
     )
 
-    st.caption(f"λ attesi → Home: **{xg.home:.3f}**, Away: **{xg.away:.3f}** (league-adjusted + recent form)")
-    grid = correct_score_matrix(xg.home, xg.away, rho=float(st.session_state.get("cs_rho", rho)), max_goals=int(gmax))
+    # Mercati derivati (1X2, O/U, BTTS)
+    st.subheader("Derivati dal modello")
+    d = _derived_from_matrix(pmat)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    with c1: _prob_card("1", d["1"])
+    with c2: _prob_card("X", d["X"])
+    with c3: _prob_card("2", d["2"])
+    with c4: _prob_card("Over 2.5", d["Over2.5"])
+    with c5: _prob_card("Under 2.5", d["Under2.5"])
+    with c6: _prob_card("BTTS", d["BTTS"])
 
-    # ---- Top score
-    top = top_correct_scores(grid, top_n=12)
-    df_top = pd.DataFrame([{"Score": s, "Prob %": round(p * 100, 2), "Quota implicita": round(q, 2)} for s, p, q in top])
-    st.markdown("#### 📈 Top correct score (probabilità più alte)")
-    st.dataframe(df_top, use_container_width=True, hide_index=True)
+    # CSV export
+    st.download_button(
+        "⬇️ Esporta matrice CS (CSV)",
+        data=pd.DataFrame(pmat).to_csv(index=False).encode("utf-8"),
+        file_name=f"correct_score_matrix_{home_team}_vs_{away_team}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
-    # ---- Heatmap
-    st.markdown("#### 🔥 Heatmap probabilità punteggio")
-    df_heat = grid.matrix.copy()
-    df_heat.index = [int(x[1:]) for x in df_heat.index]
-    df_heat.columns = [int(x[1:]) for x in df_heat.columns]
-    df_heat_long = df_heat.reset_index(names="Home").melt("Home", var_name="Away", value_name="Prob")
-    df_heat_long["Prob %"] = df_heat_long["Prob"] * 100
-
-    if alt is not None:
-        heat = (
-            alt.Chart(df_heat_long)
-            .mark_rect()
-            .encode(
-                x=alt.X("Away:O", title="Gol Away"),
-                y=alt.Y("Home:O", title="Gol Home"),
-                color=alt.Color("Prob %:Q", title="Prob %", scale=alt.Scale(scheme="greens")),
-                tooltip=[alt.Tooltip("Home:O", title="Home"),
-                         alt.Tooltip("Away:O", title="Away"),
-                         alt.Tooltip("Prob %:Q", title="Prob %", format=".2f")],
-            ).properties(height=300)
+    with st.expander("Dettagli calcolo λ (debug)", expanded=False):
+        st.write(
+            "λ calcolati combinando media di lega, moltiplicatori attacco/difesa "
+            "per contesto corretto (Home@Casa, Away@Trasferta), shrink verso 1 (kappa) "
+            "e blend con forma recente (peso recent_weight, ultime recent_n gare)."
         )
-        text = alt.Chart(df_heat_long).mark_text(baseline="middle", fontSize=11)\
-            .encode(x="Away:O", y="Home:O", text=alt.Text("Prob %:Q", format=".1f"))
-        st.altair_chart(heat + text, use_container_width=True)
-    else:
-        st.dataframe(df_heat.style.format("{:.2%}"), use_container_width=True)
-
-    # ---- EV correct score (facoltativo)
-    st.markdown("#### 💰 EV corretto punteggio (facoltativo)")
-    with st.expander("Inserisci qualche quota CS per valutare EV", expanded=False):
-        examples = "1-0:7.5, 2-0:12.0, 2-1:9.2, 1-1:6.8, 0-0:10.0"
-        txt = st.text_input("Score:Quota separati da virgola", value=examples, help="es: 1-0:7.5, 2-1:9.2")
-        commission = st.number_input("Commissione (exchange)", value=0.0, min_value=0.0, max_value=0.1, step=0.01)
-        if st.button("Calcola EV", use_container_width=True):
-            mp = {}
-            for chunk in txt.split(","):
-                chunk = chunk.strip()
-                if not chunk:
-                    continue
-                try:
-                    s, q = chunk.split(":")
-                    mp[s.strip()] = float(q)
-                except Exception:
-                    pass
-            if mp:
-                df_ev = market_ev_for_scores(grid, mp, commission=float(commission))
-                st.dataframe(df_ev, use_container_width=True, hide_index=True)
-            else:
-                st.info("Inserisci almeno una coppia score:quota valida.")
