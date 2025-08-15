@@ -634,21 +634,32 @@ def run_live_minute_analysis(df: pd.DataFrame | None = None):
 
     with tab_team:
         st.subheader(f"📈 Squadra — {home_team} (Home) / {away_team} (Away)")
-        df_team_focus = df_home_side if p_home >= p_away else df_away_side
-        team_name = home_team if p_home >= p_away else away_team
+	focus_is_home = bool(p_home >= p_away)
+        df_team_focus = df_home_side if focus_is_home else df_away_side
+        team_name = home_team if focus_is_home else away_team
+	role = "Home" if focus_is_home else "Away"
         if len(df_team_focus):
+	    st.markdown(
+                			f"<span class='badge'>🎯 <b>Team focus:</b> {team_name} ({role})</span> "
+                			f"<span class='badge small'>criterio: p({role}) ≥ p({ 'Away' if focus_is_home else 'Home' })</span>",
+                			unsafe_allow_html=True
+            			)
             rows=[]
             for line in [0.5,1.5,2.5,3.5]:
                 p = _over_prob(df_team_focus, live_h, live_a, line)
                 rows.append({"Mercato":f"Over {line}","Prob %":p*100,"Fair":1/max(p,1e-9)})
             st.caption(f"Campione squadra: {len(df_team_focus)} ({sample_badge(len(df_team_focus))})")
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
-            lam_for_T, lam_against_T = estimate_remaining_lambdas(df_team_focus, current_min, team_name==home_team)
-            top_cs_T = final_cs_distribution(lam_for_T, lam_against_T, live_h, live_a, max_goals_delta=6)[:6]
-            st.write("**Top Correct Score (squadra focus)**")
-            st.table(pd.DataFrame([{"CS": k, "Prob %": v*100} for k, v in top_cs_T]).style.format({"Prob %":"{:.2f}"}))
-        else:
-            st.info("Nessun match squadra con questo stato.")
+	    st.write("**Post-minuto (squadra focus)**")
+                                st.dataframe(compute_post_minute_stats(df_team_focus, current_min), use_container_width=True)
+
+	            lam_for_T, lam_against_T = estimate_remaining_lambdas(df_team_focus, current_min, focus_is_home)
+	            top_cs_T = final_cs_distribution(lam_for_T, lam_against_T, live_h, live_a, max_goals_delta=6)[:6]
+	            st.write("**Top Correct Score (squadra focus)**")
+	            st.table(pd.DataFrame([{"CS": k, "Prob %": v*100} for k, v in top_cs_T]).style.format({"Prob %": "{:.2f}"}))
+	  else:
+	            st.info("Nessun match squadra con questo stato.")
+
 
     with tab_signals:
         st.subheader("🧩 Segnali esterni")
