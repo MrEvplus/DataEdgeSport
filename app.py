@@ -1,4 +1,4 @@
-# app.py — ProTrader Hub (Supabase filtrato + UI raffinata + preset stagioni + fix session_state + fix colonna 'sezonul' + 📅 Upcoming + Auto-match Campionato)
+# app.py — ProTrader Hub (Supabase + 📅 Upcoming con Auto-match LeagueRaw→CODICE + divisione)
 from __future__ import annotations
 
 import os
@@ -229,18 +229,13 @@ origine_dati = st.sidebar.radio("", ["Supabase", "Upload Manuale"], key="origine
 
 if origine_dati == "Supabase":
     st.sidebar.markdown("<div class='sb-card'>📦 <b>Origine:</b> Supabase Storage (Parquet via DuckDB)</div>", unsafe_allow_html=True)
-
-    # UI integrata (lega + stagioni) e LETTURA FILTRATA server-side (cache 15')
     df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase", ui_mode="full", show_url_input=True)
-
-    # Sincronizza filtri GLOBALI con selezione Supabase
     chosen_league  = st.session_state.get("campionato_supabase")
     chosen_seasons = st.session_state.get("campionato_supabase__seasons", [])
     if chosen_league:
         st.session_state[GLOBAL_CHAMP_KEY] = str(chosen_league)
     st.session_state[GLOBAL_SEASONS_KEY] = list(chosen_seasons) if isinstance(chosen_seasons, (list, tuple)) else []
 
-    # --- Selettore rapido stagioni (presets) ---
     seasons_options = None
     for k in ("campionato_supabase__seasons_all", "campionato_supabase__seasons_choices", "supabase_seasons_choices"):
         if k in st.session_state and st.session_state[k]:
@@ -255,7 +250,6 @@ if origine_dati == "Supabase":
             seasons_options = []
 
     seasons_all_desc = _seasons_desc_for(seasons_options)
-
     st.sidebar.markdown("<div class='sb-title'>Intervallo stagioni</div>", unsafe_allow_html=True)
     mode = st.sidebar.radio(
         "",
@@ -263,14 +257,9 @@ if origine_dati == "Supabase":
         index=1 if len(seasons_all_desc) >= 3 else 0,
         key="season_mode_supabase",
     )
-
     if mode != "Manuale":
         sel_seasons = _select_seasons_by_mode(seasons_all_desc, mode)
-
-        # Aggiorna filtri GLOBALI (list)
         st.session_state[GLOBAL_SEASONS_KEY] = list(sel_seasons)
-
-        # Allinea anche il widget Supabase, se possibile
         wkey = "campionato_supabase__seasons"
         if wkey in st.session_state:
             cur_val = st.session_state[wkey]
@@ -281,29 +270,21 @@ if origine_dati == "Supabase":
                     st.session_state[wkey] = list(sel_seasons)
             except Exception:
                 pass
-
-        # Filtra localmente il DF coerentemente col preset
         season_col = "Stagione" if "Stagione" in df.columns else ("sezonul" if "sezonul" in df.columns else None)
         if season_col and sel_seasons:
             df = df[df[season_col].astype(str).isin([str(s) for s in sel_seasons])]
-
         st.sidebar.caption(f"🎯 Preset applicato → {', '.join(sel_seasons) if sel_seasons else 'nessuna stagione trovata'}")
     else:
         st.sidebar.caption("✍️ Manuale: usa il multiselect ‘Seleziona stagioni’ sopra.")
-
 else:
     df, db_selected = load_data_from_file(ui_mode="minimal")
     st.sidebar.markdown("<div class='sb-card'>📄 Upload manuale del parquet locale</div>", unsafe_allow_html=True)
-
-    # Preset stagioni anche per upload (filtra localmente)
     champ_list = sorted(df["country"].dropna().astype(str).unique()) if "country" in df.columns else []
     if champ_list:
         st.sidebar.markdown("<div class='sb-title'>Campionato (upload)</div>", unsafe_allow_html=True)
         sel_champ = st.sidebar.selectbox("", champ_list, index=0)
         st.session_state[GLOBAL_CHAMP_KEY] = sel_champ
         df_ch = df[df["country"].astype(str) == str(sel_champ)]
-
-        # leggi stagioni da 'Stagione' o 'sezonul'
         if "Stagione" in df_ch.columns:
             seasons_base = list(df_ch["Stagione"].dropna().astype(str).unique())
         elif "sezonul" in df_ch.columns:
@@ -311,7 +292,6 @@ else:
         else:
             seasons_base = []
         seasons_all_desc = _seasons_desc_for(seasons_base)
-
         st.sidebar.markdown("<div class='sb-title'>Intervallo stagioni</div>", unsafe_allow_html=True)
         mode = st.sidebar.radio(
             "",
@@ -443,7 +423,6 @@ def _guess_col(cols, candidates):
         nc = _norm(c)
         if nc in cset:
             return c
-    # fuzzy contains
     for c in cols:
         nc = _norm(c)
         if any(k in nc for k in cset):
@@ -463,7 +442,6 @@ def _read_upcoming_file(uploaded_file) -> pd.DataFrame:
     elif name.endswith(".parquet"):
         dfu = pd.read_parquet(uploaded_file)
     else:
-        # Excel (.xls/.xlsx) — per .xls serve xlrd
         try:
             dfu = pd.read_excel(uploaded_file)
         except Exception:
@@ -473,7 +451,7 @@ def _read_upcoming_file(uploaded_file) -> pd.DataFrame:
 def _auto_map_upcoming(df_in: pd.DataFrame) -> dict:
     cols = list(df_in.columns)
     M = {}
-    M["league"] = _guess_col(cols, ["league","campionato","compet","country","liga","camp","competition"])
+    M["league"] = _guess_col(cols, ["league","league raw","leagueraw","campionato","compet","country","liga","camp","competition"])
     M["date"]   = _guess_col(cols, ["date","data","matchdate"])
     M["time"]   = _guess_col(cols, ["time","ora","orario","hour"])
     M["home"]   = _guess_col(cols, ["home","team1","txtechipa1","echipa1","gazde","casa"])
@@ -486,19 +464,6 @@ def _auto_map_upcoming(df_in: pd.DataFrame) -> dict:
     M["ov35"]   = _guess_col(cols, ["over35","over 3.5","o3.5","cotao3"])
     M["btts"]   = _guess_col(cols, ["btts","both teams to score","gg","gg/no"])
     return M
-
-def _resolve_dataset_country(df_global: pd.DataFrame, league_str: str) -> str:
-    if "country" not in df_global.columns or df_global.empty:
-        return str(league_str or "")
-    options = sorted(set(df_global["country"].dropna().astype(str)))
-    s = _norm(league_str)
-    for o in options:
-        if _norm(o) == s:
-            return o
-    for o in options:
-        if s and (_norm(o).find(s) >= 0 or s.find(_norm(o)) >= 0):
-            return o
-    return options[0] if options else str(league_str or "")
 
 def _to_datetime_safe(datestr, timestr):
     try:
@@ -516,7 +481,7 @@ def _to_datetime_safe(datestr, timestr):
                 tt = pd.to_datetime(t).time()
             except Exception:
                 t = t.replace(".", ":")
-                if re.fullmatch(r"\d{4}", t):  # 1730 -> 17:30
+                if re.fullmatch(r"\d{4}", t):
                     t = t[:2] + ":" + t[2:]
                 tt = pd.to_datetime(t, errors="coerce").time()
             if tt:
@@ -526,16 +491,65 @@ def _to_datetime_safe(datestr, timestr):
         return None
 
 # -------------------------------------------------------
-# 🔎 AUTO-MATCH CAMPIONATO DA NOMI SQUADRE
+# 🔎 LEAGUE RAW → PREFISSI + AUTO-MATCH CODICE (divisione)
 # -------------------------------------------------------
+# Sinonimi (name→prefissi); verranno filtrati sui prefissi realmente presenti nel DB
+COUNTRY_PREFIX_MAP = {
+    "italy": ["ITA"], "england": ["ENG"], "spain": ["SPA","ESP"], "germany": ["GER","DEU"],
+    "france": ["FRA"], "portugal": ["POR"], "netherlands": ["NED","NET","HOL"],
+    "belgium": ["BEL"], "turkey": ["TUR"], "poland": ["POL"], "hungary": ["HUN"],
+    "romania": ["ROU","ROM"], "greece": ["GRE"], "austria": ["AUT"], "switzerland": ["SUI","SWI","CHE"],
+    "czechrepublic": ["CZE"], "czechia": ["CZE"], "slovakia": ["SVK"], "slovenia": ["SVN","SLO"],
+    "croatia": ["CRO"], "serbia": ["SRB"], "russia": ["RUS"], "ukraine": ["UKR"],
+    "sweden": ["SWE"], "norway": ["NOR"], "denmark": ["DEN","DNK"],
+    "scotland": ["SCO"], "wales": ["WAL"], "ireland": ["IRL","ROI"], "northernireland": ["NIR"],
+    "bulgaria": ["BUL"], "belarus": ["BLR"], "finland": ["FIN"], "iceland": ["ISL"]
+}
+
+def _clean_code(s: str) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", str(s).upper())
+
+@st.cache_data(show_spinner=False)
+def _existing_country_codes(df_global: pd.DataFrame) -> list[str]:
+    if "country" not in df_global.columns:
+        return []
+    codes = [ _clean_code(x) for x in df_global["country"].dropna().astype(str).unique() ]
+    # rimuovi vuoti
+    return [c for c in codes if c]
+
+@st.cache_data(show_spinner=False)
+def _teams_by_country(df_global: pd.DataFrame) -> dict[str,set]:
+    tbc: dict[str,set] = {}
+    if "country" not in df_global.columns:
+        return tbc
+    home_col = "Home" if "Home" in df_global.columns else None
+    away_col = "Away" if "Away" in df_global.columns else None
+    if not home_col and not away_col:
+        return tbc
+    for _, row in df_global.iterrows():
+        c = row.get("country")
+        if pd.isna(c): 
+            continue
+        code = _clean_code(c)
+        if not code:
+            continue
+        tbc.setdefault(code, set())
+        for col in (home_col, away_col):
+            if not col:
+                continue
+            nm = row.get(col)
+            if pd.isna(nm):
+                continue
+            nm = str(nm).strip()
+            if nm:
+                tbc[code].add(nm)
+    return tbc
+
 _NEUTRAL_TOKENS = {
     "fc","cf","sc","afc","calcio","ac","as","ssd","uc","usd","asd","polisportiva","sporting",
     "fk","bk","if","sv","sd","cd","de","clube","club","athletic","atletico","spd","ssa",
-    "u","utd","united","city","town","1903","1904","1905","1906","1907","1908","1909","1910",
-    "1911","1912","1913","1914","1915","1916","1917","1918","1919","1920","1930","1940","1950",
-    "u19","u21","ii","iii","b"
+    "u","utd","united","city","town","u19","u21","ii","iii","b"
 }
-
 def _name_tokens(name: str) -> set[str]:
     s = _norm(name)
     raw = re.findall(r"[a-z0-9]+", s)
@@ -544,7 +558,6 @@ def _name_tokens(name: str) -> set[str]:
     return toks
 
 def _token_score(a: str, b: str) -> float:
-    """Token-Set Ratio semplice: |A∩B| / max(|A|,|B|) con fallback substring."""
     A, B = _name_tokens(a), _name_tokens(b)
     if not A or not B:
         na, nb = _norm(a), _norm(b)
@@ -555,53 +568,17 @@ def _token_score(a: str, b: str) -> float:
         return 0.0
     inter = len(A & B)
     denom = max(len(A), len(B))
-    return inter / denom if denom else 0.0
+    return inter/denom if denom else 0.0
 
-@st.cache_data(show_spinner=False)
-def _build_team_indexes(df_global: pd.DataFrame):
-    """
-    Crea:
-    - teams_by_country: {country -> set(team_names)}
-    """
-    teams_by_country: dict[str,set] = {}
-    if "country" not in df_global.columns:
-        return {}
-
-    home_col = "Home" if "Home" in df_global.columns else None
-    away_col = "Away" if "Away" in df_global.columns else None
-    if not home_col and not away_col:
-        return {}
-
-    for _, row in df_global.iterrows():
-        ctry = str(row["country"]) if not pd.isna(row.get("country")) else None
-        if not ctry:
-            continue
-        teams_by_country.setdefault(ctry, set())
-        for col in (home_col, away_col):
-            if not col:
-                continue
-            nm = row.get(col)
-            if pd.isna(nm):
-                continue
-            nm = str(nm).strip()
-            if not nm:
-                continue
-            teams_by_country[ctry].add(nm)
-
-    return teams_by_country
-
-def _best_match_in_country(name: str, teams_in_country: set[str]) -> tuple[float,str|None]:
-    """Ritorna (score, team_canonico) migliore in un dato campionato."""
-    if not teams_in_country:
+def _best_match_in_code(name: str, teams_in_code: set[str]) -> tuple[float,str|None]:
+    if not teams_in_code:
         return 0.0, None
     nn = _norm(name)
-    # 1) exact normalized
-    for t in teams_in_country:
+    for t in teams_in_code:
         if _norm(t) == nn:
             return 1.0, t
-    # 2) token-score
     best_s, best_t = 0.0, None
-    for t in teams_in_country:
+    for t in teams_in_code:
         s = _token_score(name, t)
         if s > best_s:
             best_s, best_t = s, t
@@ -609,53 +586,109 @@ def _best_match_in_country(name: str, teams_in_country: set[str]) -> tuple[float
                 break
     return best_s, best_t
 
+def _candidate_prefixes_from_leagueraw(leagueraw: str, existing_codes: list[str]) -> list[str]:
+    """Converte 'Netherlands'→['NED'] ecc., poi filtra prefissi presenti nel DB."""
+    key = _norm(leagueraw)
+    # prova exact key
+    pref = COUNTRY_PREFIX_MAP.get(key, [])
+    # fallback: togli spazi / parole tipo 'the'
+    if not pref and key.startswith("the"):
+        pref = COUNTRY_PREFIX_MAP.get(key[3:], [])
+    if not pref and "republic" in key:
+        pref = COUNTRY_PREFIX_MAP.get(key.replace("republic",""), []) or COUNTRY_PREFIX_MAP.get(key.replace("republic","").strip(), [])
+    if not pref:
+        # heuristic: prime 3 lettere uppercase
+        if len(leagueraw) >= 3:
+            pref = [leagueraw.strip().upper()[:3]]
+    # filtra su prefissi realmente presenti
+    ex_pref = { re.match(r"^[A-Z]{3}", c).group(0) for c in existing_codes if re.match(r"^[A-Z]{3}", c) }
+    pref = [p for p in pref if p in ex_pref]
+    return pref
+
+def _auto_detect_code_by_leagueraw_and_teams(df_global: pd.DataFrame, leagueraw: str, home: str, away: str):
+    """
+    Sceglie il codice campionato (es. SPA1/SPA2) coerente con LeagueRaw e dove compaiono entrambe le squadre.
+    """
+    existing_codes = _existing_country_codes(df_global)
+    if not existing_codes:
+        return None, {"reason": "no-codes"}
+    prefixes = _candidate_prefixes_from_leagueraw(leagueraw or "", existing_codes)
+    if not prefixes:
+        return None, {"reason": "no-prefix-match"}
+    tbc = _teams_by_country(df_global)
+    candidates = [code for code in existing_codes if any(code.startswith(p) for p in prefixes)]
+    ranked = []
+    for code in candidates:
+        teams = tbc.get(code, set())
+        sH, mH = _best_match_in_code(home, teams)
+        sA, mA = _best_match_in_code(away, teams)
+        min_s, max_s = min(sH, sA), max(sH, sA)
+        ranked.append((code, min_s, max_s, sH, sA, mH, mA))
+    ranked.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    THRESH = 0.60  # più permissivo perché prefisso già filtra molto
+    if ranked and ranked[0][1] >= THRESH:
+        code, min_s, max_s, sH, sA, mH, mA = ranked[0]
+        return code, {
+            "home_score": sH, "home_match": mH,
+            "away_score": sA, "away_match": mA,
+            "min_score": min_s, "max_score": max_s,
+            "method": "prefix+token-match",
+            "ordered_top3": ranked[:3],
+        }
+    return None, {"reason": "low-score-prefix", "top": ranked[:3]}
+
+def _resolve_dataset_country(df_global: pd.DataFrame, league_str: str) -> str:
+    """Fallback molto generico (non usa divisione)."""
+    if "country" not in df_global.columns or df_global.empty:
+        return str(league_str or "")
+    options = sorted(set(df_global["country"].dropna().astype(str)))
+    s = _norm(league_str)
+    for o in options:
+        if _norm(o) == s:
+            return o
+    for o in options:
+        if s and (_norm(o).find(s) >= 0 or s.find(_norm(o)) >= 0):
+            return o
+    return options[0] if options else str(league_str or "")
+
 def _auto_detect_country_by_teams(df_global: pd.DataFrame, home: str, away: str, hint: str | None = None):
-    """
-    Individua il 'country' dove compaiono ENTRAMBE le squadre.
-    Logica: massimizza min(score_home, score_away). Soglia accettazione min_score >= 0.78.
-    In caso di pareggio stretto usa l'hint (LeagueRaw) per disambiguare.
-    """
-    teams_by_country = _build_team_indexes(df_global)
-    if not teams_by_country:
+    """Fallback senza usare LeagueRaw (scorre tutti i campionati del DB)."""
+    tbc = _teams_by_country(df_global)
+    if not tbc:
         return None, {"reason": "no-index"}
-
-    candidates = []
-    for ctry, teams in teams_by_country.items():
-        sH, mH = _best_match_in_country(home, teams)
-        sA, mA = _best_match_in_country(away, teams)
-        min_s = min(sH, sA)
-        max_s = max(sH, sA)
-        candidates.append((ctry, min_s, max_s, sH, sA, mH, mA))
-
-    candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    ranked = []
+    for code, teams in tbc.items():
+        sH, mH = _best_match_in_code(home, teams)
+        sA, mA = _best_match_in_code(away, teams)
+        min_s, max_s = min(sH, sA), max(sH, sA)
+        ranked.append((code, min_s, max_s, sH, sA, mH, mA))
+    ranked.sort(key=lambda x: (x[1], x[2]), reverse=True)
     THRESH = 0.78
-    if candidates and candidates[0][1] >= THRESH:
-        ctry, min_s, max_s, sH, sA, mH, mA = candidates[0]
-        details = {
+    if ranked and ranked[0][1] >= THRESH:
+        code, min_s, max_s, sH, sA, mH, mA = ranked[0]
+        return code, {
             "home_score": sH, "home_match": mH,
             "away_score": sA, "away_match": mA,
             "min_score": min_s, "max_score": max_s,
             "method": "token-match",
-            "ordered_top3": candidates[:3],
+            "ordered_top3": ranked[:3],
         }
-        # tie-break con hint
-        if len(candidates) > 1 and abs(candidates[0][1] - candidates[1][1]) < 0.05 and hint:
-            hn = _norm(hint)
-            for (c2, ms2, _, sH2, sA2, mH2, mA2) in candidates[:3]:
-                if _norm(c2) in hn:
-                    return c2, {
-                        "home_score": sH2, "home_match": mH2,
-                        "away_score": sA2, "away_match": mA2,
-                        "min_score": ms2, "max_score": max(sH2, sA2),
-                        "method": "token+hint",
-                        "ordered_top3": candidates[:3],
-                    }
-        return ctry, details
-
-    return None, {"reason": "low-score", "top": candidates[:3]}
+    # tie-break con hint (se il prefisso del hint è presente)
+    if ranked and hint:
+        pref = _candidate_prefixes_from_leagueraw(hint, _existing_country_codes(df_global))
+        for code, min_s, _, sH, sA, mH, mA in ranked[:3]:
+            if pref and any(code.startswith(p) for p in pref) and min_s >= 0.60:
+                return code, {
+                    "home_score": sH, "home_match": mH,
+                    "away_score": sA, "away_match": mA,
+                    "min_score": min_s, "max_score": max(sH, sA),
+                    "method": "token+hint",
+                    "ordered_top3": ranked[:3],
+                }
+    return None, {"reason": "low-score", "top": ranked[:3]}
 
 # -------------------------------------------------------
-# 📅 UPCOMING — UI con Auto-match Campionato
+# 📅 UPCOMING — UI
 # -------------------------------------------------------
 def render_upcoming(df_global: pd.DataFrame, db_selected_label: str):
     st.title("📅 Upcoming — partite del giorno (quote auto-import)")
@@ -684,7 +717,7 @@ def render_upcoming(df_global: pd.DataFrame, db_selected_label: str):
             return
         c1,c2,c3,c4 = st.columns(4)
         with c1:
-            col_league = st.selectbox("Lega/Campionato", options=cols, index=cols.index(auto["league"]) if auto.get("league") in cols else 0)
+            col_league = st.selectbox("Lega/Campionato (LeagueRaw)", options=cols, index=cols.index(auto["league"]) if auto.get("league") in cols else 0)
             col_date   = st.selectbox("Data", options=cols, index=cols.index(auto["date"])   if auto.get("date")   in cols else 0)
             col_time   = st.selectbox("Ora",  options=cols, index=cols.index(auto["time"])   if auto.get("time")   in cols else 0)
         with c2:
@@ -764,13 +797,20 @@ def render_upcoming(df_global: pd.DataFrame, db_selected_label: str):
     idx = label_opts.index(sel)
     row = df_up.iloc[idx]
 
-    # 🔎 AUTO-DETECT del campionato dal DB usando i nomi delle squadre
-    auto_country, det = _auto_detect_country_by_teams(df_global, row["Home"], row["Away"], hint=str(row["LeagueRaw"]))
-    league_guess = auto_country if auto_country else _resolve_dataset_country(df_global, str(row["LeagueRaw"]))
-    countries = sorted(df_global["country"].dropna().astype(str).unique()) if "country" in df_global.columns else []
+    # 1) PROVA con prefisso da LeagueRaw + token-match squadre (seleziona anche la divisione)
+    auto_code, det1 = _auto_detect_code_by_leagueraw_and_teams(df_global, str(row["LeagueRaw"]), row["Home"], row["Away"])
 
-    # UI scelta campionato (default = auto-detect)
-    st.caption("Associa il match al campionato presente nel tuo dataset (colonna ‘country’).")
+    # 2) Fallback: token-match su TUTTI i campionati
+    auto_code2, det2 = (None, None)
+    if not auto_code:
+        auto_code2, det2 = _auto_detect_country_by_teams(df_global, row["Home"], row["Away"], hint=str(row["LeagueRaw"]))
+
+    # 3) Ultimo fallback: risoluzione bland (quasi mai necessaria)
+    league_guess = auto_code or auto_code2 or _resolve_dataset_country(df_global, str(row["LeagueRaw"]))
+
+    # UI scelta campionato (default = auto rilevato)
+    countries = sorted(df_global["country"].dropna().astype(str).unique()) if "country" in df_global.columns else []
+    st.caption("Associa il match al campionato presente nel tuo dataset (colonna ‘country’: es. SPA1/SPA2).")
     default_idx = (countries.index(league_guess) if (countries and league_guess in countries) else 0)
     target_country = st.selectbox(
         "Campionato dataset",
@@ -781,38 +821,39 @@ def render_upcoming(df_global: pd.DataFrame, db_selected_label: str):
 
     # Info trasparente sull'auto-match
     with st.expander("ℹ️ Dettagli auto-match campionato", expanded=False):
-        if auto_country:
-            st.write(f"**Rilevato:** {auto_country}")
-            if isinstance(det, dict):
+        if auto_code:
+            st.write(f"**Rilevato (LeagueRaw→prefisso):** {auto_code}")
+            if isinstance(det1, dict):
                 try:
-                    st.write(f"- Home match: `{det.get('home_match')}` (score={det.get('home_score'):.2f})")
-                    st.write(f"- Away match: `{det.get('away_match')}` (score={det.get('away_score'):.2f})")
-                    st.write(f"- Metodo: {det.get('method')}  ·  min_score={det.get('min_score'):.2f}")
+                    st.write(f"- Home match: `{det1.get('home_match')}` (score={det1.get('home_score'):.2f})")
+                    st.write(f"- Away match: `{det1.get('away_match')}` (score={det1.get('away_score'):.2f})")
+                    st.write(f"- Metodo: {det1.get('method')}  ·  min_score={det1.get('min_score'):.2f}")
                 except Exception:
-                    st.write(det)
+                    st.write(det1)
+        elif auto_code2:
+            st.write(f"**Rilevato (solo token-match):** {auto_code2}")
+            if isinstance(det2, dict):
+                try:
+                    st.write(f"- Home match: `{det2.get('home_match')}` (score={det2.get('home_score'):.2f})")
+                    st.write(f"- Away match: `{det2.get('away_match')}` (score={det2.get('away_score'):.2f})")
+                    st.write(f"- Metodo: {det2.get('method')}  ·  min_score={det2.get('min_score'):.2f}")
+                except Exception:
+                    st.write(det2)
         else:
-            st.write("Nessun match sufficientemente affidabile; fallback su risoluzione per 'LeagueRaw'.")
+            st.write("Nessun match affidabile; fallback su risoluzione generale del nome campionato.")
 
-    # ▶️ Apri Pre-Match con quote importate
+    # ▶ Apri Pre-Match con quote importate
     if st.button("🚀 Apri in Pre-Match (quote autocaricate)", type="primary", use_container_width=True, key="open_prematch"):
-        # 1) Filtro globale campionato
         st.session_state[GLOBAL_CHAMP_KEY] = str(target_country)
-
-        # 2) Squadre selezionate
         st.session_state["prematch:squadra_casa"]   = str(row["Home"])
         st.session_state["prematch:squadra_ospite"] = str(row["Away"])
-
-        # 3) Quote 1X2
         if row["Odd home"] is not None: st.session_state["prematch:quota_home"] = float(row["Odd home"])
         if row["Odd Draw"] is not None: st.session_state["prematch:quota_draw"] = float(row["Odd Draw"])
         if row["Odd Away"] is not None: st.session_state["prematch:quota_away"] = float(row["Odd Away"])
-
-        # 4) Quote Over/BTTS (se presenti)
         if row.get("Over 1.5") is not None: st.session_state["prematch:shared:q_ov15"] = float(row["Over 1.5"])
         if row.get("Over 2.5") is not None: st.session_state["prematch:shared:q_ov25"] = float(row["Over 2.5"])
         if row.get("Over 3.5") is not None: st.session_state["prematch:shared:q_ov35"] = float(row["Over 3.5"])
         if row.get("BTTS")     is not None: st.session_state["prematch:shared:q_btts"] = float(row["BTTS"])
-
         st.success("Impostazioni caricate: campionato, squadre e quote.")
         try:
             run_pre_match(df_global, _db_label_for_modules())
@@ -839,5 +880,5 @@ menu_option = st.sidebar.radio("", ["Pre-Match (Hub)", "Upcoming"], key="menu_pr
 if menu_option == "Pre-Match (Hub)":
     run_pre_match(df, _db_label_for_modules())
 elif menu_option == "Upcoming":
-    # Passo il DF attuale (filtrato dai preset) così l'analisi apre nel contesto giusto
     render_upcoming(df.copy(), _db_label_for_modules())
+
