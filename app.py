@@ -59,6 +59,10 @@ label_match             = getattr(_app_utils, "label_match")
 _pre_match = load_local_module("pre_match", "pre_match.py")
 run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
 
+# Minuti-gol centralizzati
+_minutes = load_local_module("minutes_mod", "minutes.py")
+unify_goal_minute_columns = getattr(_minutes, "unify_goal_minute_columns")
+
 # -------------------------------------------------------
 # SUPPORTO
 # -------------------------------------------------------
@@ -209,11 +213,21 @@ df.columns = (
       .str.replace(r"\s+", " ", regex=True)
 )
 
+# Etichetta "Label" (se mancano le quote Away/Home, fallback a "Others")
 if "Label" not in df.columns:
     if {"Odd home", "Odd Away"}.issubset(df.columns):
         df["Label"] = df.apply(label_match, axis=1)
     else:
         df["Label"] = "Others"
+
+# -------------------------------------------------------
+# MINUTI-GOL: normalizzazione centralizzata (necessaria per alcune viste di pre_match)
+# - garantisce "minuti goal segnato home/away" usando alias o gh*/ga* se presenti
+# -------------------------------------------------------
+try:
+    df = unify_goal_minute_columns(df)
+except Exception as e:
+    st.warning(f"Normalizzazione minuti-gol non applicata: {e}")
 
 # -------------------------------------------------------
 # HEADER & BADGES
