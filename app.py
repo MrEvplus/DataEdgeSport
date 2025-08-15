@@ -1,14 +1,11 @@
-# app.py — ProTrader Hub (Selezione globale in SIDEBAR con FORM + intervalli stagioni smart)
+# app.py — ProTrader Hub (Supabase filtrato: scegli LEGA+STAGIONI prima di leggere il parquet)
 from __future__ import annotations
 
 import os
 import sys
-import re
 import importlib.util
 import streamlit as st
 import pandas as pd
-import numpy as np
-import datetime as _dt
 
 # -------------------------------------------------------
 # Loader robusto per moduli locali
@@ -57,7 +54,7 @@ load_data_from_file     = getattr(_app_utils, "load_data_from_file")
 label_match             = getattr(_app_utils, "label_match")
 
 # -------------------------------------------------------
-# Moduli principali (solo Hub Pre-Match)
+# Modulo principale (Pre-Match Hub)
 # -------------------------------------------------------
 _pre_match = load_local_module("pre_match", "pre_match.py")
 run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
@@ -65,12 +62,6 @@ run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
 # -------------------------------------------------------
 # SUPPORTO
 # -------------------------------------------------------
-def _safe_to_datetime(series: pd.Series) -> pd.Series:
-    try:
-        return pd.to_datetime(series, errors="coerce")
-    except Exception:
-        return pd.to_datetime(series.astype(str), errors="coerce")
-
 def _short_origin_label(s: str) -> str:
     if not s:
         return ""
@@ -82,7 +73,7 @@ def _short_origin_label(s: str) -> str:
             s = s.split(sep)[-1]
     return s[:60]
 
-# —— FILTRI GLOBALI (scelti in sidebar) ——
+# —— FILTRI GLOBALI condivisi tra moduli ——
 GLOBAL_CHAMP_KEY   = "global_country"
 GLOBAL_SEASONS_KEY = "global_seasons"
 
@@ -91,15 +82,6 @@ def get_global_filters():
         st.session_state.get(GLOBAL_CHAMP_KEY),
         st.session_state.get(GLOBAL_SEASONS_KEY),
     )
-
-def apply_global_filters(df: pd.DataFrame) -> pd.DataFrame:
-    champ, seasons = get_global_filters()
-    out = df.copy()
-    if champ and "country" in out.columns:
-        out = out[out["country"].astype(str) == str(champ)]
-    if seasons and "Stagione" in out.columns:
-        out = out[out["Stagione"].astype(str).isin([str(s) for s in seasons])]
-    return out
 
 def selection_badges():
     champ, seasons = get_global_filters()
@@ -115,87 +97,7 @@ def selection_badges():
 
 def _db_label_for_modules() -> str:
     champ = st.session_state.get(GLOBAL_CHAMP_KEY)
-    if champ:
-        return str(champ)
-    # fallback all'origine dati
-    return "Dataset"
-
-# -------------------------------------------------------
-# ✨ HELPER stagioni: parsing e scelta intervalli smart
-# -------------------------------------------------------
-def _parse_season_start_year(season_str: str) -> int | None:
-    """
-    Ritorna l'anno di inizio stagione (YYYY) per stringhe tipo:
-    '2024-25', '2024/2025', '2024-2025', '23/24', '2024', ecc.
-    """
-    if season_str is None:
-        return None
-    s = str(season_str)
-    nums = re.findall(r"\d{2,4}", s)
-    if not nums:
-        return None
-    first = nums[0]
-    if len(first) == 4:
-        return int(first)
-    if len(first) == 2:
-        yy = int(first)
-        return 2000 + yy if yy <= 50 else 1900 + yy
-    return None
-
-def _current_season_start_year(tz: str = "Europe/Rome") -> int:
-    # Regola: stagione calcistica inizia a luglio (7). Se mese >= 7 → stagione in corso = anno corrente.
-    now = pd.Timestamp.now(tz=tz)
-    return int(now.year if now.month >= 7 else now.year - 1)
-
-def _seasons_desc_for_champ(df_champ: pd.DataFrame) -> list[str]:
-    """Restituisce le stagioni presenti nel dataset (colonna 'Stagione') ordinate per start-year decrescente."""
-    if "Stagione" not in df_champ.columns:
-        return []
-    uniq = [str(x) for x in df_champ["Stagione"].dropna().unique()]
-    uniq = list(set(uniq))
-    uniq.sort(key=lambda s: (_parse_season_start_year(s) or -1, s), reverse=True)
-    return uniq
-
-def _map_startyear_to_seasons(seasons_list: list[str]) -> dict[int, list[str]]:
-    m: dict[int, list[str]] = {}
-    for s in seasons_list:
-        y = _parse_season_start_year(s)
-        if y is None:
-            continue
-        m.setdefault(y, []).append(s)
-    # ordina ogni lista per estetica (decrescente al solito)
-    for y in m:
-        m[y].sort(key=lambda s: (_parse_season_start_year(s) or -1, s), reverse=True)
-    return m
-
-def _select_seasons_by_mode(seasons_list: list[str], mode: str) -> list[str]:
-    """
-    Costruisce la selezione stagioni (stringhe esistenti nel dataset) in base alla modalità:
-    - 'Stagione Corrente' → solo la stagione con start-year corrente (se presente)
-    - 'Ultime 3/5/10' → start-year: [cur, cur-1, ...], includendo tutte le stringhe dataset che matchano questi anni
-    - 'Personalizza' → verrà gestito con multiselect (qui non usato)
-    """
-    if not seasons_list:
-        return []
-    cur = _current_season_start_year()
-    m = _map_startyear_to_seasons(seasons_list)
-
-    def take_last(n: int) -> list[str]:
-        years = [cur - i for i in range(n)]
-        out = []
-        for y in years:
-            out.extend(m.get(y, []))
-        return out
-
-    if mode == "Stagione Corrente":
-        return m.get(cur, [])
-    if mode == "Ultime 3":
-        return take_last(3)
-    if mode == "Ultime 5":
-        return take_last(5)
-    if mode == "Ultime 10":
-        return take_last(10)
-    return []  # Personalizza è gestito sotto
+    return str(champ) if champ else "Dataset"
 
 # -------------------------------------------------------
 # CONFIG PAGINA
@@ -204,16 +106,29 @@ st.set_page_config(page_title="ProTrader — Hub", page_icon="⚽", layout="wide
 st.sidebar.title("⚽ ProTrader — Hub")
 
 # -------------------------------------------------------
-# ORIGINE DATI (sidebar)
+# ORIGINE DATI
+#  - Supabase: ui_mode="full" → OBBLIGO scegliere Campionato/Stagioni PRIMA della lettura
+#  - Upload:   resta minimal (file completo), poi si filtra a valle
 # -------------------------------------------------------
 origine_dati = st.sidebar.radio("Origine dati", ["Supabase", "Upload Manuale"], key="origine_dati")
+
 if origine_dati == "Supabase":
-    df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase", ui_mode="minimal")
+    # UI integrata nei selettori di utils (lega + stagioni) e lettura FILTRATA server-side (cache 15')
+    df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase", ui_mode="full", show_url_input=True)
+
+    # Allinea i filtri GLOBALI con la scelta fatta nei selettori Supabase (stessi key di utils)
+    chosen_league  = st.session_state.get("campionato_supabase")
+    chosen_seasons = st.session_state.get("campionato_supabase__seasons", [])
+    if chosen_league:
+        st.session_state[GLOBAL_CHAMP_KEY] = str(chosen_league)
+    st.session_state[GLOBAL_SEASONS_KEY] = list(chosen_seasons) if isinstance(chosen_seasons, (list, tuple)) else []
+
 else:
     df, db_selected = load_data_from_file(ui_mode="minimal")
+    # Se vuoi forzare qui selezione campionato/stagioni anche per upload, possiamo aggiungere un mini pannello locale.
 
 # -------------------------------------------------------
-# MAPPING COLONNE E PULIZIA
+# MAPPING COLONNE COMPLETO & LABEL di base
 # -------------------------------------------------------
 col_map = {
     "country": "country",
@@ -294,124 +209,28 @@ df.columns = (
       .str.replace(r"\s+", " ", regex=True)
 )
 
-# Etichette (una sola volta se possibile)
 if "Label" not in df.columns:
     if {"Odd home", "Odd Away"}.issubset(df.columns):
         df["Label"] = df.apply(label_match, axis=1)
     else:
         df["Label"] = "Others"
 
-# Normalizza colonne minuti-gol se abbiamo gh*/ga* a disposizione
-lower_cols = {c.lower(): c for c in df.columns}
-has_all_gh = all(f"gh{i}" in lower_cols for i in range(1, 10))
-has_all_ga = all(f"ga{i}" in lower_cols for i in range(1, 10))
-def _concat_minutes(row: pd.Series, prefixes: list[str]) -> str:
-    mins = []
-    for p in prefixes:
-        for i in range(1, 10):
-            c = f"{p}{i}"
-            for col in (c, c.upper(), c.capitalize()):
-                if col in row and pd.notna(row[col]) and str(row[col]).strip() not in ("", "nan", "None"):
-                    try:
-                        v = int(float(str(row[col]).replace(",", ".")))
-                        if v > 0:
-                            mins.append(v)
-                    except Exception:
-                        continue
-    mins.sort()
-    return ",".join(str(m) for m in mins)
-
-if "minuti goal segnato home" not in df.columns and has_all_gh:
-    df["minuti goal segnato home"] = df.apply(lambda r: _concat_minutes(r, ["gh"]), axis=1)
-if "minuti goal segnato away" not in df.columns and has_all_ga:
-    df["minuti goal segnato away"] = df.apply(lambda r: _concat_minutes(r, ["ga"]), axis=1)
-
-# Cast numerici basilari
-for c in ["Home Goal FT","Away Goal FT","Home Goal 1T","Away Goal 1T"]:
-    if c in df.columns:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-# Limita lo storico a oggi (per KPI puliti) se c'è la colonna Data
-if "Data" in df.columns:
-    df["Data"] = _safe_to_datetime(df["Data"])
-    today = pd.Timestamp.today().normalize()
-    df = df[(df["Data"].isna()) | (df["Data"] <= today)]
+# -------------------------------------------------------
+# HEADER & BADGES
+# -------------------------------------------------------
+st.title("📊 Pre-Match — Hub")
+selection_badges()
+st.caption(f"Origine dati: **{_short_origin_label(db_selected)}** — righe caricate: **{len(df):,}**")
 
 # -------------------------------------------------------
-# SIDEBAR: Selezione GLOBALE con FORM (nessun rerun finché non premi)
+# MENU (solo Hub)
 # -------------------------------------------------------
 st.sidebar.markdown("---")
-st.sidebar.subheader("🎯 Selezione globale")
-
-# Opzioni disponibili
-champs = sorted(df["country"].dropna().astype(str).unique()) if "country" in df.columns else []
-cur_champ, cur_seasons = get_global_filters()
-if cur_champ is None and champs:
-    st.session_state[GLOBAL_CHAMP_KEY] = champs[0]
-    cur_champ = champs[0]
-
-# La lista stagioni dipende dal campionato correntemente applicato (valore attuale in sessione)
-df_tmp = df.copy()
-if cur_champ and "country" in df_tmp.columns:
-    df_tmp = df_tmp[df_tmp["country"].astype(str) == str(cur_champ)]
-seasons_all_desc = _seasons_desc_for_champ(df_tmp)  # ordinamento decrescente per start-year
-
-with st.sidebar.form("global_selection_form_sidebar", clear_on_submit=False):
-    sel_champ = st.selectbox(
-        "🏆 Campionato",
-        options=champs,
-        index=(champs.index(cur_champ) if cur_champ in champs else 0) if champs else 0,
-        help="La selezione è globale (si applica a tutte le sezioni)."
-    ) if champs else None
-
-    # Modalità intervallo
-    modes = ["Stagione Corrente", "Ultime 3", "Ultime 5", "Ultime 10", "Personalizza"]
-    mode = st.radio("Intervallo stagioni", modes, horizontal=True, index=0)
-
-    sel_seasons = cur_seasons
-    if mode == "Personalizza":
-        sel_seasons = st.multiselect(
-            "Seleziona stagioni (più recente in alto)",
-            options=seasons_all_desc,
-            default=cur_seasons if cur_seasons else seasons_all_desc[:5]
-        )
-    else:
-        sel_seasons = _select_seasons_by_mode(seasons_all_desc, mode)
-
-    applied = st.form_submit_button("✅ Applica")
-
-if applied:
-    if sel_champ is not None:
-        st.session_state[GLOBAL_CHAMP_KEY] = sel_champ
-    st.session_state[GLOBAL_SEASONS_KEY] = sel_seasons
-
-# -------------------------------------------------------
-# KPI rapidi (sul dataset filtrato se già scelto)
-# -------------------------------------------------------
-df_for_kpi = apply_global_filters(df)
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Partite DB", f"{len(df_for_kpi):,}")
-if "country" in df_for_kpi.columns: c2.metric("Campionati", df_for_kpi["country"].nunique())
-if "Home" in df_for_kpi.columns: c3.metric("Squadre", pd.concat([df_for_kpi["Home"], df_for_kpi["Away"]]).nunique())
-if "Stagione" in df_for_kpi.columns: c4.metric("Stagioni", df_for_kpi["Stagione"].nunique())
-
-db_short = _short_origin_label(str(db_selected))
-if db_short:
-    st.caption(f"Origine: **{db_short}**")
-
-# -------------------------------------------------------
-# MENU: Solo Hub Pre-Match
-# -------------------------------------------------------
-st.sidebar.markdown("---")
-menu_option = st.sidebar.radio(
-    "Naviga",
-    ["Pre-Match (Hub)"],
-    key="menu_principale",
-)
+menu_option = st.sidebar.radio("Naviga", ["Pre-Match (Hub)"], key="menu_principale")
 
 # -------------------------------------------------------
 # ROUTING
 # -------------------------------------------------------
 if menu_option == "Pre-Match (Hub)":
-    selection_badges()
-    run_pre_match(apply_global_filters(df), _db_label_for_modules())
+    # Il dataset è già filtrato in lettura (Supabase full) — passiamo dritti al modulo principale
+    run_pre_match(df, _db_label_for_modules())
