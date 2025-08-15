@@ -8,6 +8,7 @@ import importlib.util
 import streamlit as st
 import pandas as pd
 import numpy as np
+import datetime as _dt
 
 # -------------------------------------------------------
 # Loader robusto per moduli locali
@@ -56,39 +57,10 @@ load_data_from_file     = getattr(_app_utils, "load_data_from_file")
 label_match             = getattr(_app_utils, "label_match")
 
 # -------------------------------------------------------
-# Moduli principali
+# Moduli principali (solo Hub Pre-Match)
 # -------------------------------------------------------
-_pre_match            = load_local_module("pre_match", "pre_match.py")
-_analisi_live_minuto  = load_local_module("analisi_live_minuto", "analisi_live_minuto.py")
-_partite_del_giorno   = load_local_module("partite_del_giorno", "partite_del_giorno.py")
-_reverse_engineering  = load_local_module("reverse_engineering", "reverse_engineering.py")
-
+_pre_match = load_local_module("pre_match", "pre_match.py")
 run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
-
-# ✅ includo sia run_live_minuto_analysis che run_live_minute_analysis (fallback)
-run_live_minuto_analysis = get_callable(
-    _analisi_live_minuto,
-    "run_live_minuto_analysis", "run_live_minute_analysis",
-    "run_live_minuto", "run_live", "main",
-    label="analisi_live_minuto",
-)
-
-run_partite_del_giorno  = get_callable(_partite_del_giorno, "run_partite_del_giorno", label="partite_del_giorno")
-run_reverse_engineering = get_callable(_reverse_engineering, "run_reverse_engineering", label="reverse_engineering")
-
-# -------------------------------------------------------
-# Legacy opzionali dietro toggle
-# -------------------------------------------------------
-LEGACY_OK = True
-try:
-    _macros  = load_local_module("macros", "macros.py")
-    _squadre = load_local_module("squadre", "squadre.py")
-    _correct_score_ev_sezione = load_local_module("correct_score_ev_sezione", "correct_score_ev_sezione.py")
-    run_macro_stats      = get_callable(_macros, "run_macro_stats", label="macros")
-    run_team_stats       = get_callable(_squadre, "run_team_stats", label="squadre")
-    run_correct_score_ev = get_callable(_correct_score_ev_sezione, "run_correct_score_ev", label="correct_score_ev_sezione")
-except Exception:
-    LEGACY_OK = False
 
 # -------------------------------------------------------
 # SUPPORTO
@@ -99,32 +71,16 @@ def _safe_to_datetime(series: pd.Series) -> pd.Series:
     except Exception:
         return pd.to_datetime(series.astype(str), errors="coerce")
 
-def _season_sort_key(x: str) -> int:
-    if x is None:
-        return -1
-    s = str(x)
-    nums = re.findall(r"\d{4}|\d{2}", s)
-    if not nums:
-        try: return int(s)
-        except Exception: return -1
-    vals = [(int(n) if len(n)==4 else 2000+int(n)) for n in nums]
-    return max(vals)
-
-def _concat_minutes(row: pd.Series, prefixes: list[str]) -> str:
-    mins = []
-    for p in prefixes:
-        for i in range(1, 10):
-            c = f"{p}{i}"
-            for col in (c, c.upper(), c.capitalize()):
-                if col in row and pd.notna(row[col]) and str(row[col]).strip() not in ("", "nan", "None"):
-                    try:
-                        v = int(float(str(row[col]).replace(",", ".")))
-                        if v > 0:
-                            mins.append(v)
-                    except Exception:
-                        continue
-    mins.sort()
-    return ",".join(str(m) for m in mins)
+def _short_origin_label(s: str) -> str:
+    if not s:
+        return ""
+    sl = s.lower()
+    if sl.startswith("supabase"):
+        return "Supabase"
+    for sep in ("/", "\\"):
+        if sep in s:
+            s = s.split(sep)[-1]
+    return s[:60]
 
 # —— FILTRI GLOBALI (scelti in sidebar) ——
 GLOBAL_CHAMP_KEY   = "global_country"
@@ -157,22 +113,16 @@ def selection_badges():
         unsafe_allow_html=True
     )
 
-def _short_origin_label(s: str) -> str:
-    if not s:
-        return ""
-    sl = s.lower()
-    if sl.startswith("supabase"):
-        return "Supabase"
-    for sep in ("/", "\\"):
-        if sep in s:
-            s = s.split(sep)[-1]
-    return s[:60]
+def _db_label_for_modules() -> str:
+    champ = st.session_state.get(GLOBAL_CHAMP_KEY)
+    if champ:
+        return str(champ)
+    # fallback all'origine dati
+    return "Dataset"
 
 # -------------------------------------------------------
-# ✨ NUOVI HELPER: stagione corrente & intervalli per anni
+# ✨ HELPER stagioni: parsing e scelta intervalli smart
 # -------------------------------------------------------
-import datetime as _dt
-
 def _parse_season_start_year(season_str: str) -> int | None:
     """
     Ritorna l'anno di inizio stagione (YYYY) per stringhe tipo:
@@ -233,7 +183,6 @@ def _select_seasons_by_mode(seasons_list: list[str], mode: str) -> list[str]:
     def take_last(n: int) -> list[str]:
         years = [cur - i for i in range(n)]
         out = []
-        # decrescente: aggiungo per cur, cur-1, ...
         for y in years:
             out.extend(m.get(y, []))
         return out
@@ -246,7 +195,7 @@ def _select_seasons_by_mode(seasons_list: list[str], mode: str) -> list[str]:
         return take_last(5)
     if mode == "Ultime 10":
         return take_last(10)
-    return []  # Personalizza sarà gestito a parte
+    return []  # Personalizza è gestito sotto
 
 # -------------------------------------------------------
 # CONFIG PAGINA
@@ -264,7 +213,7 @@ else:
     df, db_selected = load_data_from_file(ui_mode="minimal")
 
 # -------------------------------------------------------
-# MAPPING COLONNE E PULIZIA (esteso, invariato)
+# MAPPING COLONNE E PULIZIA
 # -------------------------------------------------------
 col_map = {
     "country": "country",
@@ -356,6 +305,22 @@ if "Label" not in df.columns:
 lower_cols = {c.lower(): c for c in df.columns}
 has_all_gh = all(f"gh{i}" in lower_cols for i in range(1, 10))
 has_all_ga = all(f"ga{i}" in lower_cols for i in range(1, 10))
+def _concat_minutes(row: pd.Series, prefixes: list[str]) -> str:
+    mins = []
+    for p in prefixes:
+        for i in range(1, 10):
+            c = f"{p}{i}"
+            for col in (c, c.upper(), c.capitalize()):
+                if col in row and pd.notna(row[col]) and str(row[col]).strip() not in ("", "nan", "None"):
+                    try:
+                        v = int(float(str(row[col]).replace(",", ".")))
+                        if v > 0:
+                            mins.append(v)
+                    except Exception:
+                        continue
+    mins.sort()
+    return ",".join(str(m) for m in mins)
+
 if "minuti goal segnato home" not in df.columns and has_all_gh:
     df["minuti goal segnato home"] = df.apply(lambda r: _concat_minutes(r, ["gh"]), axis=1)
 if "minuti goal segnato away" not in df.columns and has_all_ga:
@@ -399,25 +364,18 @@ with st.sidebar.form("global_selection_form_sidebar", clear_on_submit=False):
         help="La selezione è globale (si applica a tutte le sezioni)."
     ) if champs else None
 
-    # Nuove modalità intervallo
+    # Modalità intervallo
     modes = ["Stagione Corrente", "Ultime 3", "Ultime 5", "Ultime 10", "Personalizza"]
-    mode_idx_default = 0
-    if seasons_all_desc:
-        # Se in sessione hai già una selezione, non forziamo una radio coerente: usiamo default 0
-        pass
-    mode = st.radio("Intervallo stagioni", modes, horizontal=True, index=mode_idx_default)
+    mode = st.radio("Intervallo stagioni", modes, horizontal=True, index=0)
 
     sel_seasons = cur_seasons
-
     if mode == "Personalizza":
-        # Personalizza: multiselezione delle stagioni presenti (sempre decrescenti)
         sel_seasons = st.multiselect(
             "Seleziona stagioni (più recente in alto)",
             options=seasons_all_desc,
             default=cur_seasons if cur_seasons else seasons_all_desc[:5]
         )
     else:
-        # Costruzione automatica dalle stagioni dataset usando start-year corrente e intervallo per anni
         sel_seasons = _select_seasons_by_mode(seasons_all_desc, mode)
 
     applied = st.form_submit_button("✅ Applica")
@@ -442,49 +400,14 @@ if db_short:
     st.caption(f"Origine: **{db_short}**")
 
 # -------------------------------------------------------
-# MENU: Hub + toggle legacy
+# MENU: Solo Hub Pre-Match
 # -------------------------------------------------------
 st.sidebar.markdown("---")
-show_legacy = st.sidebar.checkbox("Mostra strumenti avanzati (legacy)")
-
-PAGINE_BASE = [
-    "Pre-Match (Hub)",
-    "Analisi Live da Minuto",
-    "Partite del Giorno",
-    "🧠 Reverse Engineering EV+",
-]
-PAGINE_LEGACY = [
-    "Macro Stats per Campionato",
-    "Statistiche per Squadre",
-    "Correct Score EV",
-] if (show_legacy and LEGACY_OK) else []
-
 menu_option = st.sidebar.radio(
     "Naviga",
-    PAGINE_BASE + (["— Strumenti legacy —"] + PAGINE_LEGACY if PAGINE_LEGACY else []),
+    ["Pre-Match (Hub)"],
     key="menu_principale",
 )
-
-# -------------------------------------------------------
-# Utility (badge selezione) e label per moduli
-# -------------------------------------------------------
-def selection_badges():
-    champ, seasons = get_global_filters()
-    txt_champ = f"🏆 <b>{champ}</b>" if champ else "🏷️ nessun campionato selezionato"
-    txt_seas  = ", ".join([str(s) for s in seasons]) if seasons else "—"
-    st.markdown(
-        f"<div style='margin:.25rem 0 .75rem 0;display:flex;gap:.5rem;flex-wrap:wrap'>"
-        f"<span style='border:1px solid #e5e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>{txt_champ}</span>"
-        f"<span style='border:1px solid #e5e7eb;padding:.25rem .6rem;border-radius:999px;background:#f3f4f6'>🗓️ <b>Stagioni:</b> {txt_seas}</span>"
-        f"</div>",
-        unsafe_allow_html=True
-    )
-
-def _db_label_for_modules() -> str:
-    champ = st.session_state.get(GLOBAL_CHAMP_KEY)
-    if champ:
-        return str(champ)
-    return _short_origin_label(str(db_selected)) or "Dataset"
 
 # -------------------------------------------------------
 # ROUTING
@@ -492,36 +415,3 @@ def _db_label_for_modules() -> str:
 if menu_option == "Pre-Match (Hub)":
     selection_badges()
     run_pre_match(apply_global_filters(df), _db_label_for_modules())
-
-elif menu_option == "Analisi Live da Minuto":
-    champ, _ = get_global_filters()
-    if not champ:
-        st.warning("Seleziona prima il **Campionato** nella sidebar.")
-    selection_badges()
-    run_live_minuto_analysis(apply_global_filters(df))
-
-elif menu_option == "Partite del Giorno":
-    champ, _ = get_global_filters()
-    if not champ:
-        st.warning("Seleziona prima il **Campionato** nella sidebar.")
-    selection_badges()
-    run_partite_del_giorno(apply_global_filters(df), _db_label_for_modules())
-
-elif menu_option == "🧠 Reverse Engineering EV+":
-    champ, _ = get_global_filters()
-    if not champ:
-        st.warning("Seleziona prima il **Campionato** nella sidebar.")
-    selection_badges()
-    run_reverse_engineering(apply_global_filters(df))
-
-elif menu_option == "Macro Stats per Campionato" and LEGACY_OK:
-    selection_badges()
-    run_macro_stats(apply_global_filters(df), _db_label_for_modules())
-
-elif menu_option == "Statistiche per Squadre" and LEGACY_OK:
-    selection_badges()
-    run_team_stats(apply_global_filters(df), _db_label_for_modules())
-
-elif menu_option == "Correct Score EV" and LEGACY_OK:
-    selection_badges()
-    run_correct_score_ev(apply_global_filters(df), _db_label_for_modules())
