@@ -28,18 +28,25 @@ except Exception:
     except Exception:
         run_correct_score_panel = None  # type: ignore
 
+# LIVE: usa il nuovo nome run_live_minute_panel, con fallback ai vecchi alias
+_run_live = None
 try:
-    from analisi_live_minuto import run_live_minuto_analysis as _run_live
+    from analisi_live_minuto import run_live_minute_panel as _run_live  # nuovo nome
 except Exception:
     try:
-        from analisi_live_minuto import run_live_minute_analysis as _run_live  # type: ignore
+        from analisi_live_minuto import run_live_minuto_analysis as _run_live  # legacy 1
     except Exception:
-        _run_live = None  # type: ignore
+        try:
+            from analisi_live_minuto import run_live_minute_analysis as _run_live  # legacy 2
+        except Exception:
+            _run_live = None  # type: ignore
 
+# utils & minutes (per label e normalizzazione minuti-gol)
 try:
-    from utils import label_match
+    from utils import label_match, get_global_source_df
 except Exception:
-    # fallback ultra semplice
+    get_global_source_df = lambda: (pd.DataFrame(), {})  # fallback
+    # fallback ultra semplice per label
     def label_match(row):
         try:
             h = float(row.get("Odd home", 2.0))
@@ -51,6 +58,11 @@ except Exception:
         if a < 1.9 and h > 3.2:
             return "A_MediumFav 1.5-2"
         return "Others"
+
+try:
+    from minutes import unify_goal_minute_columns
+except Exception:
+    unify_goal_minute_columns = lambda df: df  # no-op fallback
 
 # ========= EV centralizzato da ev_tables (obbligatorio) =========
 try:
@@ -824,6 +836,14 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
 def run_pre_match(df: pd.DataFrame, db_selected: str):
     st.title("📊 Pre-Match – Analisi per Trader Professionisti")
 
+    # Fallback: se df è vuoto/proviene da un rerun, prova a usare la fonte globale dal loader
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+        gdf, info = get_global_source_df()
+        if isinstance(gdf, pd.DataFrame) and not gdf.empty:
+            df = gdf.copy()
+            if not db_selected:
+                db_selected = str(info.get("league") or info.get("name") or "Dataset")
+
     qin = _get_qparams()
     _init_shared_quotes()
 
@@ -876,6 +896,13 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     df["Away"] = _ensure_str(df["Away"]).str.strip()
     if "Label" not in df.columns:
         df["Label"] = df.apply(label_match, axis=1)
+
+    # ⚙️ Normalizzazione minuti-gol (serve ai blocchi KPI + Primo Gol)
+    try:
+        df = unify_goal_minute_columns(df)
+        df_league_all = unify_goal_minute_columns(df_league_all)
+    except Exception:
+        pass
 
     # Ricerca rapida + assegnazione
     all_teams = sorted(set(df["Home"].dropna().unique()) | set(df["Away"].dropna().unique()))
