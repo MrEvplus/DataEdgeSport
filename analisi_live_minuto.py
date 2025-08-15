@@ -1,4 +1,4 @@
-# analisi_live_minuto.py — v4.8 (robust filters & champ fallback)
+# analisi_live_minuto.py — v4.9 (fix indent, Over prob, team focus post-minuto)
 import re
 import math
 from collections import defaultdict
@@ -68,9 +68,14 @@ def _btts_prob(df):
     return 0 if np.isnan(val) else float(val)
 
 def _over_prob(df, current_h, current_a, threshold):
+    """
+    Probabilità che il TOTALE FINALE superi 'threshold', condizionato allo stato live corrente.
+    Confronta i gol EXTRA con quanti gol mancano alla linea.
+    """
     if df is None or df.empty: return 0.5
     extra = (df["Home Goal FT"] + df["Away Goal FT"]) - (current_h + current_a)
-    val = (extra > threshold).mean()
+    need = max(0.0, float(threshold) - float(current_h + current_a))
+    val = (extra > need).mean()
     return 0 if np.isnan(val) else float(val)
 
 def _blend(p_main, n_main, p_side, n_side, clamp=200):
@@ -391,7 +396,7 @@ def run_live_minute_analysis(df: pd.DataFrame | None = None):
     except Exception:
         pass
 
-    import altair as alt
+    import altair as alt  # noqa: F401
     tab_setup, tab_ev, tab_camp, tab_team, tab_signals = st.tabs(
         ["🎛️ Setup", "🧠 EV Advisor", "🏆 Campionato (stesso stato)", "📈 Squadra focus", "🧩 Segnali"]
     )
@@ -591,6 +596,7 @@ def run_live_minute_analysis(df: pd.DataFrame | None = None):
         # opzionale: converti pattern in boost/malus per l'AI score
         pat_eff = defaultdict(float)  # placeholder no-op
 
+    # ---------- EV ----------
     with tab_ev:
         st.subheader("EV Advisor — ranking opportunità")
         st.caption(f"Contesto: **{champ} / {label_live}**, minuto **{current_min}'**, score **{live_h}-{live_a}** · campione **{len(df_matched)}**.")
@@ -610,6 +616,7 @@ def run_live_minute_analysis(df: pd.DataFrame | None = None):
         st.download_button("⬇️ Esporta ranking EV (CSV)", data=view.to_csv(index=False).encode("utf-8"),
                            file_name="ev_advisor_snapshot.csv", mime="text/csv")
 
+    # ---------- Campionato ----------
     with tab_camp:
         st.subheader("🏆 Campionato — stesso label & stato live")
         if len(df_matched):
@@ -632,8 +639,8 @@ def run_live_minute_analysis(df: pd.DataFrame | None = None):
         else:
             st.info("Nessun match nel campione con questo stato.")
 
-    
-with tab_team:
+    # ---------- Squadra focus ----------
+    with tab_team:
         st.subheader(f"📈 Squadra — {home_team} (Home) / {away_team} (Away)")
         # Scegliamo la squadra focus in base alla probabilità 1X2 stimata nello stato live
         focus_is_home = bool(p_home >= p_away)
@@ -658,7 +665,7 @@ with tab_team:
             st.caption(f"Campione squadra: {len(df_team_focus)} ({sample_badge(len(df_team_focus))})")
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-            # NEW: Post-minuto dedicata alla squadra focus
+            # Post-minuto dedicata alla squadra focus
             st.write("**Post-minuto (squadra focus)**")
             st.dataframe(compute_post_minute_stats(df_team_focus, current_min), use_container_width=True)
 
@@ -669,7 +676,9 @@ with tab_team:
             st.table(pd.DataFrame([{"CS": k, "Prob %": v * 100} for k, v in top_cs_T]).style.format({"Prob %": "{:.2f}"}))
         else:
             st.info("Nessun match squadra con questo stato.")
-with tab_signals:
+
+    # ---------- Segnali ----------
+    with tab_signals:
         st.subheader("🧩 Segnali esterni")
         st.caption("I segnali non alterano l’EV ma possono guidare la lettura.")
         st.info("Se abilitati nel Setup, verranno mostrati qui (macro KPI, pattern, bias).")
@@ -680,6 +689,7 @@ def run_live_minute_panel(df: pd.DataFrame | None = None):
         df = gdf if isinstance(gdf, pd.DataFrame) else pd.DataFrame()
     return run_live_minute_analysis(df)
 
+# alias utili per app.py
 run_live_minuto_analysis  = run_live_minute_analysis
 run_live_minuto           = run_live_minute_analysis
 run_live                  = run_live_minute_analysis
