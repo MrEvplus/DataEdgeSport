@@ -1316,7 +1316,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
 with tab_stats:
     st.subheader("Statistiche squadre")
 
-    # Ordina le stagioni in modo robusto (gestisce "23", "2023-24", "2024/25", ecc.)
+    # Ordina le stagioni in modo robusto (gestisce 23, 2023-24, 2024/25, ecc.)
     import re
     def _season_sort_key(val) -> int:
         s = str(val)
@@ -1336,13 +1336,11 @@ with tab_stats:
             df_league_all["Stagione"]
             .dropna().astype(str).unique().tolist()
         )
-        # ordinamento: più recente -> più vecchia
-        seasons_desc = sorted(seasons_all, key=_season_sort_key, reverse=True)
+        seasons_desc = sorted(seasons_all, key=_season_sort_key, reverse=True)  # più recente → più vecchia
     else:
         seasons_desc = []
 
     with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
-        # default = sempre la stagione più recente (se presente)
         default_curr = [seasons_desc[0]] if seasons_desc else []
         selected_stats_seasons = st.multiselect(
             "Scegli le stagioni da includere (se vuoto = tutte)",
