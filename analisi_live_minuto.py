@@ -1,8 +1,8 @@
-# analisi_live_minuto.py — v4.6 ProTrader (con cache in sessione)
+# analisi_live_minuto.py — v4.6 ProTrader
 # EV 1X2 Back/Lay, Over 0.5/1.5/2.5/3.5, BTTS • EV Advisor (AI score + Pattern opz.)
 # CS/Hedge, Post-minuto, Campionato/Squadra, Segnali esterni (pattern/squadre/macros)
-# NOVITÀ: normalizzazione *dinamica* delle colonne minuti-gol (auto-detect) → Post-minuto robusto.
-#         + CACHE in sessione: (1) sotto-dataset campionato+label normalizzato, (2) match "stesso stato".
+# NOTE: normalizzazione minuti-gol CENTRALIZZATA in minutes.py (unify_goal_minute_columns, parse_goal_times)
+#       + CACHE in sessione: (1) sotto-dataset campionato+label normalizzato, (2) match "stesso stato".
 
 import re
 import math
@@ -11,7 +11,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from utils import label_match, extract_minutes
+from utils import label_match
+from minutes import unify_goal_minute_columns, parse_goal_times
 
 # =========================
 # ---- CONFIG / SHARED ----
@@ -106,7 +107,8 @@ def safe_parse_score(txt: str):
         return None
 
 def _goals_up_to(series, minute):
-    mins = extract_minutes(pd.Series([series if isinstance(series, str) else str(series or "")]))
+    s = series if isinstance(series, str) else str(series or "")
+    mins = parse_goal_times(s)
     return sum(m <= minute for m in mins)
 
 def _matches_matching_state(df, minute, live_h, live_a):
@@ -157,125 +159,6 @@ def sample_badge(n: int) -> str:
     if n < 30:  return "🔴 Campione piccolo"
     if n < 100: return "🟡 Campione medio"
     return "🟢 Campione robusto"
-
-# =========================
-# ---- MINUTI GOAL I/O ----
-# =========================
-# 1) colonne "sicure" (nomi canonici o molto frequenti)
-_SAFE_HOME = {
-    "minuti goal segnato home", "minuti goal home", "minuti gol home",
-    "minuti goal (home)", "minuti_goal_home", "minuti_gol_home",
-    "minuti goal casa", "minuti gol casa", "minuti home",
-    "minuti goal scored home", "minuti goal segnati home",
-    "minuti goal team home", "minuti_home",
-    "minuti goal h", "mgolh", "minuti_goal_h", "minuti_gol_h",
-    "minuti goal home team", "minuti goal home side",
-    "minuti goal squadra casa", "minuti goal squadra home",
-    "minuti goal segnato home",  # canonico
-    "minuti goal home team",
-    "minuti goal home side",
-    "minuti gol casa (home)", "minuti gol (home)",
-    "minuti goal (casa)", "minuti goal squadra di casa",
-    "minuti goal segnato (home)", "minuti goal segnati (home)",
-    "minuti goal segnati casa",
-    "minuti goal home ft", "minuti goal home live"
-}
-_SAFE_AWAY = {
-    "minuti goal segnato away", "minuti goal away", "minuti gol away",
-    "minuti goal (away)", "minuti_goal_away", "minuti_gol_away",
-    "minuti goal ospite", "minuti gol ospite", "minuti away",
-    "minuti goal scored away", "minuti goal segnati away",
-    "minuti goal team away", "minuti_away",
-    "minuti goal a", "mgola", "minuti_goal_a", "minuti_gol_a",
-    "minuti goal away team", "minuti goal away side",
-    "minuti goal squadra away", "minuti goal squadra ospite",
-    "minuti goal away side",
-    "minuti gol ospiti (away)", "minuti gol (away)",
-    "minuti goal (trasferta)", "minuti goal squadra in trasferta",
-    "minuti goal segnato (away)", "minuti goal segnati (away)",
-    "minuti goal segnati trasferta",
-    "minuti goal away ft", "minuti goal away live"
-}
-
-# 2) regex dinamici per intercettare numerazioni tipo "Home Goal 1 (min)" / "gh1" / "away_goal_min3", ecc.
-_RE_HOME_MINUTE = re.compile(r"(home[^a-z]*|casa).*?(goal|gol).*?(min|minute)", re.I)
-_RE_AWAY_MINUTE = re.compile(r"(away|trasf|ospit).*?(goal|gol).*?(min|minute)", re.I)
-_RE_GH_NUM      = re.compile(r"^gh\d+$", re.I)   # gh1, gh2, ...
-_RE_GA_NUM      = re.compile(r"^ga\d+$", re.I)   # ga1, ga2, ...
-_RE_HOME_GOAL_N = re.compile(r"^home\s*goal\s*\d+\s*\(min\)$", re.I)
-_RE_AWAY_GOAL_N = re.compile(r"^away\s*goal\s*\d+\s*\(min\)$", re.I)
-
-def _detect_minute_columns(df: pd.DataFrame):
-    """
-    Ritorna due liste (home_cols, away_cols) con tutte le colonne che contengono
-    minuti gol Home/Away. Usa nomi noti + regex euristiche.
-    """
-    home_cols, away_cols = [], []
-    cl = [c for c in df.columns if isinstance(c, str)]
-    low = {c: c.strip().lower() for c in cl}
-
-    for c in cl:
-        l = low[c]
-        if l in _SAFE_HOME: home_cols.append(c)
-        if l in _SAFE_AWAY: away_cols.append(c)
-
-        if _RE_HOME_MINUTE.search(l) or _RE_HOME_GOAL_N.match(l) or _RE_GH_NUM.match(l):
-            if c not in home_cols: home_cols.append(c)
-        if _RE_AWAY_MINUTE.search(l) or _RE_AWAY_GOAL_N.match(l) or _RE_GA_NUM.match(l):
-            if c not in away_cols: away_cols.append(c)
-
-    # fallback per colonne "Minuti Goal Home/Away" capitalizzate
-    if "Minuti Goal Home" in df.columns and "Minuti Goal Home" not in home_cols:
-        home_cols.append("Minuti Goal Home")
-    if "Minuti Goal Away" in df.columns and "Minuti Goal Away" not in away_cols:
-        away_cols.append("Minuti Goal Away")
-
-    return home_cols, away_cols
-
-def _row_minutes_concat_from_cols(row, cols):
-    """
-    Concatena minuti presenti su 'cols' in una stringa 'm1;m2;...'.
-    Accetta sia stringhe tipo '12;45' che singoli numeri (int/float).
-    """
-    vals = []
-    for col in cols:
-        if col not in row: continue
-        v = row[col]
-        if pd.isna(v) or str(v).strip() == "": continue
-        s = str(v).strip()
-        if s.replace(".", "", 1).isdigit():  # singolo numero (anche '37.0')
-            try:
-                mins = [int(float(s))]
-            except Exception:
-                mins = []
-        else:
-            mins = extract_minutes(pd.Series([s]))
-        for m in mins:
-            if 0 < int(m) <= 130:
-                vals.append(int(m))
-    vals = sorted(set(vals))
-    return ";".join(str(x) for x in vals)
-
-def unify_goal_minute_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Crea (se mancanti/da rigenerare) le colonne canoniche:
-      - 'minuti goal segnato home'
-      - 'minuti goal segnato away'
-    individuando dinamicamente tutte le colonne minute rilevanti.
-    """
-    df = df.copy()
-    hcols, acols = _detect_minute_columns(df)
-
-    # se già presenti, le manteniamo — ma se sono vuote proviamo a rigenerarle
-    need_home = "minuti goal segnato home" not in df.columns or (df["minuti goal segnato home"].fillna("").eq("").all() and len(hcols)>0)
-    need_away = "minuti goal segnato away" not in df.columns or (df["minuti goal segnato away"].fillna("").eq("").all() and len(acols)>0)
-
-    if need_home:
-        df["minuti goal segnato home"] = df.apply(lambda r: _row_minutes_concat_from_cols(r, hcols), axis=1)
-    if need_away:
-        df["minuti goal segnato away"] = df.apply(lambda r: _row_minutes_concat_from_cols(r, acols), axis=1)
-
-    return df
 
 # =========================
 # ====== SPEED-UP CACHE ===
@@ -400,8 +283,8 @@ def compute_post_minute_stats(df, current_min):
     rec = {lbl: {"GF":0,"GS":0,"1+":0,"2+":0,"N":0} for lbl in tf_labels}
 
     for _, r in df.iterrows():
-        mh = extract_minutes(pd.Series([r.get("minuti goal segnato home","")]))
-        ma = extract_minutes(pd.Series([r.get("minuti goal segnato away","")]))
+        mh = parse_goal_times(r.get("minuti goal segnato home",""))
+        ma = parse_goal_times(r.get("minuti goal segnato away",""))
         future = [(m,"H") for m in mh if m>current_min] + [(m,"A") for m in ma if m>current_min]
         bucket = {lbl: {"GF":0,"GS":0} for lbl in tf_labels}
         for m, side in future:
@@ -669,7 +552,7 @@ def _legend_badges():
 def run_live_minute_analysis(df: pd.DataFrame):
     st.set_page_config(page_title="Analisi Live Minuto — ProTrader", layout="wide")
     _inject_css()
-    st.title("⏱️ Analisi Live — ProTrader Suite")
+    st.title(⏱️ Analisi Live — ProTrader Suite")
 
     tab_setup, tab_ev, tab_camp, tab_team, tab_signals = st.tabs(
         ["🎛️ Setup", "🧠 EV Advisor", "🏆 Campionato (stesso stato)", "📈 Squadra focus", "🧩 Segnali"]
