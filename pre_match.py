@@ -1312,25 +1312,53 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         _render_glossary_ev()
         _download_df_button(df_ev_squadre, "ev_storico_squadre.csv", "⬇️ Scarica EV Storico CSV")
 
-    # === TAB 4: Statistiche squadre ===
-    with tab_stats:
-        st.subheader("Statistiche squadre")
-        if "Stagione" in df_league_all.columns:
-            seasons_desc = _seasons_desc(df_league_all["Stagione"].dropna().unique().tolist())
-        else:
-            seasons_desc = []
-        with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
-            default_curr = _pick_current_season(seasons_desc) if seasons_desc else []
-            selected_stats_seasons = st.multiselect(
-                "Scegli le stagioni da includere (se vuoto = tutte)",
-                options=seasons_desc,
-                default=default_curr,
-                key=_k("stats_seasons_filter"),
-            )
-        df_stats_scope = df_league_all.copy()
-        if selected_stats_seasons:
-            df_stats_scope = df_stats_scope[df_stats_scope["Stagione"].astype(str).isin([str(s) for s in selected_stats_seasons])]
-        render_team_stats_tab(df_stats_scope, league, squadra_casa, squadra_ospite)
+# === TAB 4: Statistiche squadre ===
+with tab_stats:
+    st.subheader("Statistiche squadre")
+
+    # Ordina le stagioni in modo robusto (gestisce "23", "2023-24", "2024/25", ecc.)
+    import re
+    def _season_sort_key(val) -> int:
+        s = str(val)
+        nums = re.findall(r"\d{2,4}", s)
+        if not nums:
+            return -1
+        years = []
+        for tok in nums:
+            n = int(tok)
+            if n < 100:   # "23" -> 2023
+                n += 2000
+            years.append(n)
+        return max(years)  # per "2023-24" prende 2024
+
+    if "Stagione" in df_league_all.columns:
+        seasons_all = (
+            df_league_all["Stagione"]
+            .dropna().astype(str).unique().tolist()
+        )
+        # ordinamento: più recente -> più vecchia
+        seasons_desc = sorted(seasons_all, key=_season_sort_key, reverse=True)
+    else:
+        seasons_desc = []
+
+    with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
+        # default = sempre la stagione più recente (se presente)
+        default_curr = [seasons_desc[0]] if seasons_desc else []
+        selected_stats_seasons = st.multiselect(
+            "Scegli le stagioni da includere (se vuoto = tutte)",
+            options=seasons_desc,
+            default=default_curr,
+            key=_k("stats_seasons_filter"),
+        )
+
+    # Applica il filtro SOLO a questa sezione
+    df_stats_scope = df_league_all.copy()
+    if selected_stats_seasons:
+        df_stats_scope = df_stats_scope[
+            df_stats_scope["Stagione"].astype(str).isin([str(s) for s in selected_stats_seasons])
+        ]
+
+    render_team_stats_tab(df_stats_scope, league, squadra_casa, squadra_ospite)
 
     # === TAB 5: Correct Score ===
     with tab_cs:
