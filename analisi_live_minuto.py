@@ -689,8 +689,10 @@ def run_live_minute_panel(df: pd.DataFrame | None = None):
         df = gdf if isinstance(gdf, pd.DataFrame) else pd.DataFrame()
     return run_live_minute_analysis(df)
 
-# alias utili per app.py
-run_live_minuto_analysis  = run_live_minute_analysis
-run_live_minuto           = run_live_minute_analysis
-run_live                  = run_live_minute_analysis
-def main(df: pd.DataFrame | None = None): return run_live_minute_analysis(df)
+# --- alias di compatibilità (nomi vecchi) ---
+run_live_minuto_analysis = run_live_minute_analysis
+run_live_minuto          = run_live_minute_analysis
+run_live                 = run_live_minute_analysis
+
+def main(df: pd.DataFrame | None = None):
+    return run_live_minute_analysis(df)
