@@ -1,4 +1,4 @@
-# app.py — ProTrader Hub (Supabase filtrato + UI raffinata + preset stagioni + fix session_state)
+# app.py — ProTrader Hub (Supabase filtrato + UI raffinata + preset stagioni + fix session_state + fix colonna 'sezonul')
 from __future__ import annotations
 
 import os
@@ -239,13 +239,20 @@ if origine_dati == "Supabase":
     st.session_state[GLOBAL_SEASONS_KEY] = list(chosen_seasons) if isinstance(chosen_seasons, (list, tuple)) else []
 
     # --- Selettore rapido stagioni (presets) ---
+    # 1) prova a leggere l'elenco stagioni dai keys esposti da utils
     seasons_options = None
     for k in ("campionato_supabase__seasons_all", "campionato_supabase__seasons_choices", "supabase_seasons_choices"):
         if k in st.session_state and st.session_state[k]:
             seasons_options = [str(x) for x in st.session_state[k]]
             break
+    # 2) fallback: leggi dal df ancora NON mappato: 'Stagione' o 'sezonul'
     if seasons_options is None:
-        seasons_options = sorted(df["Stagione"].dropna().astype(str).unique()) if "Stagione" in df.columns else []
+        if "Stagione" in df.columns:
+            seasons_options = sorted(df["Stagione"].dropna().astype(str).unique())
+        elif "sezonul" in df.columns:
+            seasons_options = sorted(df["sezonul"].dropna().astype(str).unique())
+        else:
+            seasons_options = []
 
     seasons_all_desc = _seasons_desc_for(seasons_options)
 
@@ -276,8 +283,10 @@ if origine_dati == "Supabase":
                 pass
 
         # Filtra localmente il DF (coerente col preset); la prossima lettura server-side userà il widget
-        if "Stagione" in df.columns and sel_seasons:
-            df = df[df["Stagione"].astype(str).isin([str(s) for s in sel_seasons])]
+        # NB: qui il df può avere ancora 'sezonul' come nome colonna
+        season_col = "Stagione" if "Stagione" in df.columns else ("sezonul" if "sezonul" in df.columns else None)
+        if season_col and sel_seasons:
+            df = df[df[season_col].astype(str).isin([str(s) for s in sel_seasons])]
 
         st.sidebar.caption(f"🎯 Preset applicato → {', '.join(sel_seasons) if sel_seasons else 'nessuna stagione trovata'}")
     else:
@@ -294,7 +303,15 @@ else:
         sel_champ = st.sidebar.selectbox("", champ_list, index=0)
         st.session_state[GLOBAL_CHAMP_KEY] = sel_champ
         df_ch = df[df["country"].astype(str) == str(sel_champ)]
-        seasons_all_desc = _seasons_desc_for(list(df_ch["Stagione"].dropna().astype(str).unique())) if "Stagione" in df_ch.columns else []
+
+        # leggi stagioni da 'Stagione' o 'sezonul'
+        if "Stagione" in df_ch.columns:
+            seasons_base = list(df_ch["Stagione"].dropna().astype(str).unique())
+        elif "sezonul" in df_ch.columns:
+            seasons_base = list(df_ch["sezonul"].dropna().astype(str).unique())
+        else:
+            seasons_base = []
+        seasons_all_desc = _seasons_desc_for(seasons_base)
 
         st.sidebar.markdown("<div class='sb-title'>Intervallo stagioni</div>", unsafe_allow_html=True)
         mode = st.sidebar.radio(
@@ -306,8 +323,9 @@ else:
         if mode != "Manuale":
             sel_seasons = _select_seasons_by_mode(seasons_all_desc, mode)
             st.session_state[GLOBAL_SEASONS_KEY] = list(sel_seasons)
-            if "Stagione" in df.columns and sel_seasons:
-                df = df[(df["country"].astype(str) == str(sel_champ)) & (df["Stagione"].astype(str).isin([str(s) for s in sel_seasons]))]
+            season_col = "Stagione" if "Stagione" in df.columns else ("sezonul" if "sezonul" in df.columns else None)
+            if season_col and sel_seasons:
+                df = df[(df["country"].astype(str) == str(sel_champ)) & (df[season_col].astype(str).isin([str(s) for s in sel_seasons]))]
             else:
                 df = df[df["country"].astype(str) == str(sel_champ)]
             st.sidebar.caption(f"🎯 Preset applicato → {', '.join(sel_seasons) if sel_seasons else 'nessuna stagione trovata'}")
