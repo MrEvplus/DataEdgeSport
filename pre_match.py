@@ -1320,8 +1320,8 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         else:
             seasons_desc = []
         with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
-	     seasons_all = []
-                                if "Stagione" in df_league_all.columns:
+	    seasons_all = []
+                              if "Stagione" in df_league_all.columns:
 	                    seasons_all = sorted(
             					df_league_all["Stagione"].dropna().astype(str).unique(),
             					key=_season_sort_key, reverse=True
