@@ -1,4 +1,4 @@
-# app.py — ProTrader Hub (Supabase filtrato: scegli LEGA+STAGIONI prima di leggere il parquet)
+# app.py — ProTrader Hub (UI sidebar raffinata + Supabase filtrato: scegli LEGA+STAGIONI prima di leggere il parquet)
 from __future__ import annotations
 
 import os
@@ -46,9 +46,7 @@ def get_callable(mod, *names, label: str = ""):
 # utils.py come "utils"
 # -------------------------------------------------------
 _app_utils = load_local_module("app_utils", "utils.py")
-# Esponi come "utils" per compatibilità con altri moduli
-sys.modules["utils"] = _app_utils
-
+sys.modules["utils"] = _app_utils  # compat
 load_data_from_supabase = getattr(_app_utils, "load_data_from_supabase")
 load_data_from_file     = getattr(_app_utils, "load_data_from_file")
 label_match             = getattr(_app_utils, "label_match")
@@ -62,6 +60,77 @@ run_pre_match = get_callable(_pre_match, "run_pre_match", label="pre_match")
 # Minuti-gol centralizzati
 _minutes = load_local_module("minutes_mod", "minutes.py")
 unify_goal_minute_columns = getattr(_minutes, "unify_goal_minute_columns")
+
+# -------------------------------------------------------
+# UI — stile sidebar (carino + neutro, non invasivo)
+# -------------------------------------------------------
+def _inject_sidebar_css():
+    st.markdown("""
+    <style>
+    /* Layout base sidebar */
+    [data-testid="stSidebar"] > div {
+      padding-top: .6rem;
+    }
+    .sb-header {
+      background: linear-gradient(135deg, #0ea5e9 0%, #22c55e 100%);
+      color: #fff; padding: .9rem .95rem; border-radius: 14px;
+      box-shadow: 0 8px 24px rgba(2,6,23,.25);
+      margin-bottom: .75rem; border: 1px solid rgba(255,255,255,.2);
+    }
+    .sb-header b { font-weight: 800; }
+    .sb-sub { opacity:.85; font-size: .9rem; margin-top: .15rem; }
+
+    .sb-title {
+      margin: .6rem 0 .25rem 0; font-weight: 700; font-size: .92rem; color: #0f172a;
+    }
+    .sb-card {
+      background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 14px;
+      padding: .6rem .65rem .7rem; margin-bottom: .6rem;
+    }
+
+    /* Selectbox & Multiselect (Baseweb) */
+    [data-testid="stSidebar"] div[data-baseweb="select"] > div {
+      background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px;
+      box-shadow: 0 3px 10px rgba(2,6,23,.04);
+      min-height: 44px;
+    }
+    [data-testid="stSidebar"] div[data-baseweb="select"] svg {
+      opacity: .7;
+    }
+    /* Tag (chip) stagioni */
+    [data-testid="stSidebar"] div[data-baseweb="tag"] {
+      border-radius: 999px !important;
+      background: #fee2e2 !important; color: #7f1d1d !important; border-color: #fecaca !important;
+      font-weight: 600;
+    }
+
+    /* Radio as cards */
+    [data-testid="stSidebar"] [role="radiogroup"] label {
+      border: 1px solid #e5e7eb; border-radius: 12px; padding: .35rem .55rem;
+      margin-bottom: .35rem; transition: all .12s ease-in-out;
+      display:flex; align-items:center; gap:.4rem;
+      background: #fff;
+    }
+    [data-testid="stSidebar"] [role="radiogroup"] label:hover {
+      border-color: #cbd5e1; box-shadow: 0 4px 14px rgba(2,6,23,.06);
+    }
+
+    /* Tiny badge (righe caricate) */
+    .tiny-badge {
+      display:inline-block; padding:.1rem .5rem; border-radius: 999px;
+      background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; font-size:.78rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+def _sidebar_header():
+    st.sidebar.markdown(
+        "<div class='sb-header'>"
+        "<div>⚽ <b>ProTrader — Hub</b></div>"
+        "<div class='sb-sub'>Dataset filtrato in lettura: scegli prima Campionato & Stagioni</div>"
+        "</div>",
+        unsafe_allow_html=True
+    )
 
 # -------------------------------------------------------
 # SUPPORTO
@@ -107,16 +176,17 @@ def _db_label_for_modules() -> str:
 # CONFIG PAGINA
 # -------------------------------------------------------
 st.set_page_config(page_title="ProTrader — Hub", page_icon="⚽", layout="wide")
-st.sidebar.title("⚽ ProTrader — Hub")
+_inject_sidebar_css()
+_sidebar_header()
 
 # -------------------------------------------------------
-# ORIGINE DATI
-#  - Supabase: ui_mode="full" → OBBLIGO scegliere Campionato/Stagioni PRIMA della lettura
-#  - Upload:   resta minimal (file completo), poi si filtra a valle
+# ORIGINE DATI (con UI stile "card")
 # -------------------------------------------------------
-origine_dati = st.sidebar.radio("Origine dati", ["Supabase", "Upload Manuale"], key="origine_dati")
+st.sidebar.markdown("<div class='sb-title'>Origine dati</div>", unsafe_allow_html=True)
+origine_dati = st.sidebar.radio("", ["Supabase", "Upload Manuale"], key="origine_dati")
 
 if origine_dati == "Supabase":
+    st.sidebar.markdown("<div class='sb-card'>📦 <b>Origine:</b> Supabase Storage (Parquet via DuckDB)</div>", unsafe_allow_html=True)
     # UI integrata nei selettori di utils (lega + stagioni) e lettura FILTRATA server-side (cache 15')
     df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase", ui_mode="full", show_url_input=True)
 
@@ -129,7 +199,7 @@ if origine_dati == "Supabase":
 
 else:
     df, db_selected = load_data_from_file(ui_mode="minimal")
-    # Se vuoi forzare qui selezione campionato/stagioni anche per upload, possiamo aggiungere un mini pannello locale.
+    st.sidebar.markdown("<div class='sb-card'>📄 Upload manuale del parquet locale</div>", unsafe_allow_html=True)
 
 # -------------------------------------------------------
 # MAPPING COLONNE COMPLETO & LABEL di base
@@ -179,6 +249,7 @@ col_map = {
     "sutht1": "Tiri in Porta Home 1T",
     "sutht2": "Tiri in Porta Home 2T",
     "sutat":  "Tiri in Porta Away FT",
+    "satat1": "Tiri in Porta Away 1T",  # typo protection (se presente in alcune fonti)
     "sutat1": "Tiri in Porta Away 1T",
     "sutat2": "Tiri in Porta Away 2T",
     "mgolh": "Minuti Goal Home",
@@ -213,17 +284,14 @@ df.columns = (
       .str.replace(r"\s+", " ", regex=True)
 )
 
-# Etichetta "Label" (se mancano le quote Away/Home, fallback a "Others")
+# Etichetta "Label"
 if "Label" not in df.columns:
     if {"Odd home", "Odd Away"}.issubset(df.columns):
         df["Label"] = df.apply(label_match, axis=1)
     else:
         df["Label"] = "Others"
 
-# -------------------------------------------------------
-# MINUTI-GOL: normalizzazione centralizzata (necessaria per alcune viste di pre_match)
-# - garantisce "minuti goal segnato home/away" usando alias o gh*/ga* se presenti
-# -------------------------------------------------------
+# Minuti-gol normalizzati (standardizza / ricostruisce da gh*/ga* se mancano)
 try:
     df = unify_goal_minute_columns(df)
 except Exception as e:
@@ -234,17 +302,19 @@ except Exception as e:
 # -------------------------------------------------------
 st.title("📊 Pre-Match — Hub")
 selection_badges()
-st.caption(f"Origine dati: **{_short_origin_label(db_selected)}** — righe caricate: **{len(df):,}**")
+
+# Origine & righe
+db_short = _short_origin_label(str(db_selected))
+st.caption(f"Origine dati: **{db_short}** · <span class='tiny-badge'>Righe caricate: {len(df):,}</span>", unsafe_allow_html=True)
 
 # -------------------------------------------------------
-# MENU (solo Hub)
+# MENU (solo Hub) — stile a card grazie al CSS radio
 # -------------------------------------------------------
-st.sidebar.markdown("---")
-menu_option = st.sidebar.radio("Naviga", ["Pre-Match (Hub)"], key="menu_principale")
+st.sidebar.markdown("<div class='sb-title'>Naviga</div>", unsafe_allow_html=True)
+menu_option = st.sidebar.radio("", ["Pre-Match (Hub)"], key="menu_principale")
 
 # -------------------------------------------------------
 # ROUTING
 # -------------------------------------------------------
 if menu_option == "Pre-Match (Hub)":
-    # Il dataset è già filtrato in lettura (Supabase full) — passiamo dritti al modulo principale
     run_pre_match(df, _db_label_for_modules())
