@@ -1,8 +1,8 @@
-# analisi_live_minuto.py — v4.6 ProTrader
-# EV 1X2 Back/Lay, Over 0.5/1.5/2.5/3.5, BTTS • EV Advisor (AI score + Pattern opz.)
-# CS/Hedge, Post-minuto, Campionato/Squadra, Segnali esterni (pattern/squadre/macros)
-# NOTE: normalizzazione minuti-gol CENTRALIZZATA in minutes.py (unify_goal_minute_columns, parse_goal_times)
-#       + CACHE in sessione: (1) sotto-dataset campionato+label normalizzato, (2) match "stesso stato".
+# analisi_live_minuto.py — v4.7 ProTrader (integrato con utils.get_global_source_df)
+# - Usa la FONTE GLOBALE caricata dal loader (utils.get_global_source_df) se df non è passato o è vuoto
+# - Applica i filtri GLOBALI scelti nell’Hub: campionato + stagioni
+# - Normalizza minuti-gol tramite minutes.unify_goal_minute_columns
+# - Mantiene EV 1X2/Goal/BTTS, Advisor, Post-minuto, Segnali esterni, CS/Hedge, cache locali
 
 import re
 import math
@@ -11,13 +11,17 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from utils import label_match
+from utils import label_match, get_global_source_df
 from minutes import unify_goal_minute_columns, parse_goal_times
 
 # =========================
 # ---- CONFIG / SHARED ----
 # =========================
 _SHARED_PREFIX = "prematch:shared:"
+
+# chiavi usate dall'Hub (app.py) per i filtri globali
+GLOBAL_CHAMP_KEY   = "global_country"
+GLOBAL_SEASONS_KEY = "global_seasons"
 
 def _shared_key(name: str) -> str:
     return f"{_SHARED_PREFIX}{name}"
@@ -549,32 +553,81 @@ def _legend_badges():
 # =========================
 # ---------- MAIN ---------
 # =========================
-def run_live_minute_analysis(df: pd.DataFrame):
+def run_live_minute_analysis(df: pd.DataFrame | None = None):
+    # Deve stare prima di qualsiasi altro elemento Streamlit
     st.set_page_config(page_title="Analisi Live Minuto — ProTrader", layout="wide")
     _inject_css()
-    st.title(⏱️ Analisi Live — ProTrader Suite")
+    st.title("⏱️ Analisi Live — ProTrader Suite")
 
+    # --- Sorgente dati centralizzata (utils) ---
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+        gdf, meta = get_global_source_df()
+        if isinstance(gdf, pd.DataFrame) and not gdf.empty:
+            df = gdf.copy()
+
+    if df is None or df.empty:
+        st.warning("Nessun dataset disponibile. Seleziona campionato & stagioni dalla sidebar dell’Hub.")
+        return
+
+    # --- Applica i filtri globali scelti nell'Hub (campionato + stagioni) ---
+    champ_global   = st.session_state.get(GLOBAL_CHAMP_KEY)
+    seasons_global = st.session_state.get(GLOBAL_SEASONS_KEY)
+
+    if champ_global and "country" in df.columns:
+        df = df[df["country"].astype(str) == str(champ_global)]
+
+    if seasons_global and "Stagione" in df.columns:
+        df = df[df["Stagione"].astype(str).isin([str(s) for s in seasons_global])]
+
+    # Label & normalizzazione minuti-gol (una volta)
+    if "Label" not in df.columns:
+        df = df.copy()
+        df["Label"] = df.apply(label_match, axis=1)
+    try:
+        df = unify_goal_minute_columns(df)
+    except Exception:
+        pass
+
+    import altair as alt
     tab_setup, tab_ev, tab_camp, tab_team, tab_signals = st.tabs(
         ["🎛️ Setup", "🧠 EV Advisor", "🏆 Campionato (stesso stato)", "📈 Squadra focus", "🧩 Segnali"]
     )
 
     # ---------- SETUP ----------
     with tab_setup:
+        if "country" not in df.columns:
+            st.error("Il dataset non contiene la colonna 'country'."); return
+
         champ_options = sorted(df["country"].dropna().astype(str).unique())
-        champ_default = st.session_state.get("campionato_corrente", champ_options[0] if champ_options else "N/A")
+        if not champ_options:
+            st.error("Nessun campionato disponibile dopo i filtri. Cambia campionato/stagioni nell’Hub."); return
+
+        champ_default = (
+            st.session_state.get("campionato_corrente") or           # passato dal Pre-Match
+            st.session_state.get(GLOBAL_CHAMP_KEY) or                # filtro globale Hub
+            champ_options[0]
+        )
+
         col0,col1 = st.columns([1.2,2])
         with col0:
-            champ = st.selectbox("🏆 Campionato", champ_options,
-                                 index=champ_options.index(champ_default) if champ_default in champ_options else 0,
-                                 key="champ_live",
-                                 help="Seleziona il campionato da analizzare. Filtreremo lo storico a campionato+label.")
+            champ = st.selectbox(
+                "🏆 Campionato",
+                champ_options,
+                index=champ_options.index(champ_default) if champ_default in champ_options else 0,
+                key="champ_live",
+                help="Seleziona il campionato da analizzare. Filtreremo lo storico a campionato+label."
+            )
         with col1:
+            if "Home" not in df.columns or "Away" not in df.columns:
+                st.error("Il dataset non ha colonne 'Home' / 'Away'."); return
+            teams_home = sorted(df["Home"].dropna().astype(str).unique())
+            teams_away = sorted(df["Away"].dropna().astype(str).unique())
             c1,c2 = st.columns(2)
             with c1:
-                home_team = st.selectbox("🏠 Casa", sorted(df["Home"].dropna().unique()), key="home_live",
+                home_team = st.selectbox("🏠 Casa", teams_home, key="home_live",
                                          help="Squadra di casa della partita live.")
             with c2:
-                away_team = st.selectbox("🚪 Trasferta", sorted(df["Away"].dropna().unique()), key="away_live",
+                away_team = st.selectbox("🚪 Trasferta", teams_away, key="away_live",
                                          help="Squadra in trasferta della partita live.")
 
         st.subheader("Quote 1X2 Live")
@@ -656,7 +709,8 @@ def run_live_minute_analysis(df: pd.DataFrame):
         }
 
     # ---------- PRECALCOLI COMUNI ----------
-    if "_live_ctx" not in st.session_state: st.stop()
+    if "_live_ctx" not in st.session_state: 
+        st.stop()
     ctx = st.session_state["_live_ctx"]
     champ, home_team, away_team = ctx["champ"], ctx["home"], ctx["away"]
     odd_home, odd_draw, odd_away = ctx["odd_home"], ctx["odd_draw"], ctx["odd_away"]
@@ -798,18 +852,19 @@ def run_live_minute_analysis(df: pd.DataFrame):
                            file_name="ev_advisor_snapshot.csv", mime="text/csv")
 
         if show_explain:
-            st.markdown("**Breakdown 1X2 (blend e prior)**")
             expl = pd.DataFrame([
                 {"Esito":"1","p_main":pH_L,"n_main":len(df_matched),"p_side":pH_H,"n_side":len(df_home_side),"p_final":p_home,"prior":priors["1"],"Δ":p_home-priors["1"]},
                 {"Esito":"X","p_main":pD_L,"n_main":len(df_matched),"p_side":p_draw_side,"n_side":len(df_home_side)+len(df_away_side),"p_final":p_draw,"prior":priors["X"],"Δ":p_draw-priors["X"]},
-                {"Esito":"2","p_main":pA_L,"n_main":len(df_matched),"p_side":pA_A,"n_side":len(df_away_side),"p_final":p_away,"prior":priors["2"],"Δ":p_away-priors["2"]},
+                {"Esito":"2","p_main":pA_L,"n_main":len(df_matched),"p_side":pA_A,"n_side":len(df_away_side),"p_final":p_away,"prior":priors["2"]},
             ])
             num_cols = [c for c in expl.columns if pd.api.types.is_numeric_dtype(expl[c])]
             fmt = {c: "{:.3f}" for c in num_cols}
+            st.markdown("**Breakdown 1X2 (blend e prior)**")
             st.dataframe(expl.style.format(fmt), use_container_width=True)
             st.caption("p_final = weighted blend(p_main, p_side) con cap su pesi; EV calcolato su p_final; AI score ↑ se EV>0, campione solido e Δ vs prior alto. I Pattern (se attivati) modulano solo l’AI score per evidenziare opportunità coerenti col contesto.")
 
     # ---------- CAMPIONATO ----------
+    import altair as alt
     with tab_camp:
         st.subheader("🏆 Campionato — stesso label & stato live")
         t1, t2, t3, t4 = st.tabs(["Esiti 1X2", "Over / EV", "Post-minuto", "CS / Hedge"])
@@ -968,19 +1023,26 @@ def run_live_minute_analysis(df: pd.DataFrame):
         else:
             st.caption("Segnali esterni disattivati nel Setup.")
 
-# ---- Alias di compatibilità con app.py / pre_match.py ----
-def run_live_minuto_analysis(df: pd.DataFrame):
+# ---- Wrapper & alias di compatibilità con pre_match.py/app.py ----
+def run_live_minute_panel(df: pd.DataFrame | None = None):
+    """Wrapper per compatibilità col Pre-Match."""
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty):
+        gdf, _ = get_global_source_df()
+        df = gdf if isinstance(gdf, pd.DataFrame) else pd.DataFrame()
+    return run_live_minute_analysis(df)
+
+def run_live_minuto_analysis(df: pd.DataFrame | None = None):
     """Alias retrocompatibile."""
     return run_live_minute_analysis(df)
 
-def run_live_minuto(df: pd.DataFrame):
+def run_live_minuto(df: pd.DataFrame | None = None):
     """Alias retrocompatibile."""
     return run_live_minute_analysis(df)
 
-def run_live(df: pd.DataFrame):
+def run_live(df: pd.DataFrame | None = None):
     """Alias retrocompatibile."""
     return run_live_minute_analysis(df)
 
-def main(df: pd.DataFrame):
+def main(df: pd.DataFrame | None = None):
     """Alias retrocompatibile."""
     return run_live_minute_analysis(df)
