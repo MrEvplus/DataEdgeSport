@@ -7,6 +7,16 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+# ========= EV centralizzato da ev_tables (obbligatorio) =========
+try:
+    from ev_tables import (
+        build_ev_table as _build_ev_table,
+        build_ev_table_cached as _build_ev_table_cached,
+    )
+except Exception as _e:
+    st.error("Modulo `ev_tables.py` non trovato o non importabile. Assicurati di aver creato/posizionato `ev_tables.py` accanto ai moduli.")
+    raise
+
 
 # =========================================================
 # Helpers generali
@@ -347,8 +357,14 @@ def _render_setup_and_body(
     shared = _get_shared_quotes()
     q15, q25, q35, qgg = shared["ov15"], shared["ov25"], shared["ov35"], shared["btts"]
 
-    df_ev, best = _build_ev_table(
-        df_home_ctx, df_away_ctx, df_h2h,
+    # Passiamo DataFrame "leggeri" come in pre_match.py
+    base_cols = ["Home Goal FT", "Away Goal FT"]
+    home_ctx_light = df_home_ctx[base_cols].copy()
+    away_ctx_light = df_away_ctx[base_cols].copy()
+    h2h_light      = df_h2h[base_cols].copy()
+
+    df_ev, best = _build_ev_table_cached(
+        home_ctx_light, away_ctx_light, h2h_light,
         squadra_casa, squadra_ospite,
         q15, q25, q35, qgg
     )
@@ -743,88 +759,8 @@ def compute_goal_patterns_total(patterns_home, patterns_away, total_home_matches
 
 
 # =========================================================
-# EV storico: tabella e best
+# EV storico: best card (il calcolo è centralizzato in ev_tables)
 # =========================================================
-def _market_prob(df: pd.DataFrame, market: str, line: float | None) -> float:
-    if df.empty:
-        return 0.0
-    hg = _coerce_num(df["Home Goal FT"]).fillna(0)
-    ag = _coerce_num(df["Away Goal FT"]).fillna(0)
-    goals = hg + ag
-    if market == "BTTS":
-        ok = ((hg > 0) & (ag > 0)).mean()
-    else:
-        ok = (goals > float(line)).mean() if line is not None else 0.0
-    return round(float(ok) * 100, 2)
-
-def _build_ev_table(
-    df_home_ctx: pd.DataFrame,
-    df_away_ctx: pd.DataFrame,
-    df_h2h: pd.DataFrame,
-    squadra_casa: str,
-    squadra_ospite: str,
-    q15: float,
-    q25: float,
-    q35: float,
-    qgg: float,
-):
-    markets = [
-        ("Over 1.5", 1.5, q15),
-        ("Over 2.5", 2.5, q25),
-        ("Over 3.5", 3.5, q35),
-        ("BTTS", None, qgg),
-    ]
-    rows = []
-    candidates = []
-
-    for name, line, q in markets:
-        p_home = _market_prob(df_home_ctx, name, line)
-        p_away = _market_prob(df_away_ctx, name, line)
-        p_blnd = round((p_home + p_away) / 2, 2) if (p_home > 0 or p_away > 0) else 0.0
-        p_h2h  = _market_prob(df_h2h, name, line)
-
-        ev_home = round(q * (p_home / 100) - 1, 2)
-        ev_away = round(q * (p_away / 100) - 1, 2)
-        ev_blnd = round(q * (p_blnd / 100) - 1, 2)
-        ev_h2h  = round(q * (p_h2h  / 100) - 1, 2)
-
-        n_h, n_a, n_h2h = len(df_home_ctx), len(df_away_ctx), len(df_h2h)
-        qual_blnd = _quality_label(n_h + n_a)
-        qual_h2h  = _quality_label(n_h2h)
-
-        rows.append({
-            "Mercato": name,
-            "Quota": q,
-            f"{squadra_casa} @Casa %": p_home,
-            f"EV {squadra_casa}": ev_home,
-            f"{squadra_ospite} @Trasferta %": p_away,
-            f"EV {squadra_ospite}": ev_away,
-            "Blended %": p_blnd,
-            "EV Blended": ev_blnd,
-            "Qualità Blended": qual_blnd,
-            "Head-to-Head %": p_h2h,
-            "EV H2H": ev_h2h,
-            "Qualità H2H": qual_h2h,
-            "Match H": n_h,
-            "Match A": n_a,
-            "Match H2H": n_h2h,
-        })
-
-        candidates += [
-            {"scope": "Blended", "mercato": name, "quota": q, "prob": p_blnd, "ev": ev_blnd, "campione": n_h + n_a, "qualita": qual_blnd},
-            {"scope": "Head-to-Head", "mercato": name, "quota": q, "prob": p_h2h, "ev": ev_h2h, "campione": n_h2h, "qualita": qual_h2h},
-        ]
-
-    df_ev = pd.DataFrame(rows)
-
-    best = None
-    for c in sorted(candidates, key=lambda x: (x["ev"], 1 if x["scope"] == "Blended" else 0), reverse=True):
-        if c["ev"] > 0:
-            best = c
-            break
-
-    return df_ev, best
-
 def _best_ev_card(best: dict):
     bg = "#052e16"
     st.markdown(

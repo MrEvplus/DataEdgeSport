@@ -1,11 +1,4 @@
-# pre_match.py — versione PRO consolidata (EV centralizzato)
-# - Macro KPI Plus con tabelle professionali
-# - EV/ROI con glossari e stile
-# - Statistiche Squadre: filtro solo per la sezione (default stagione corrente)
-# - Live: passaggio contesto + badge
-# - Fix robustezza: _first_present, _calc_market_roi
-# - Calibrazione 1X2: chart Altair robusto senza transform_fold
-# - NEW: EV storico importato da ev_tables.py con fallback locale
+# pre_match.py — versione PRO consolidata (EV centralizzato, senza duplicati locali)
 
 from __future__ import annotations
 
@@ -59,15 +52,15 @@ except Exception:
             return "A_MediumFav 1.5-2"
         return "Others"
 
-# ========= NEW: EV centralizzato da ev_tables con fallback =========
+# ========= EV centralizzato da ev_tables (obbligatorio) =========
 try:
     from ev_tables import (
         build_ev_table as _build_ev_table,
         build_ev_table_cached as _build_ev_table_cached,
     )
-    _EV_FROM_MODULE = True
-except Exception:
-    _EV_FROM_MODULE = False
+except Exception as _e:
+    st.error("Modulo `ev_tables.py` non trovato o non importabile. Assicurati di aver creato/posizionato `ev_tables.py` accanto ai moduli.")
+    raise
 
 # ========= Config HUB =========
 USE_GLOBAL_FILTERS = True
@@ -427,15 +420,6 @@ def _gf_ga(df, side):
     return (df["Home Goal FT"].mean(), df["Away Goal FT"].mean()) if side=="Home" else (df["Away Goal FT"].mean(), df["Home Goal FT"].mean())
 
 def _shots(df: pd.DataFrame, side: str):
-    """
-    Ritorna:
-      - shots_for / shots_against   (somme sui match)
-      - sot_for / sot_against       (somme sui match)
-      - pace_avg                    (media per match di tiri totali = for+against)
-    Supporta sia le colonne short-code (suth, suta, sutht, su tat)
-    sia eventuali etichette 'umane' se presenti.
-    """
-    # Possibili alias (primo che troviamo viene usato)
     def pick(*names):
         for n in names:
             if n in df.columns:
@@ -447,33 +431,23 @@ def _shots(df: pd.DataFrame, side: str):
     h_sot  = pick("sutht", "Tiri in Porta Home FT")
     a_sot  = pick("sutat", "Tiri in Porta Away FT")
 
-    # Se mancano colonne, creiamo serie vuote (NaN) così non esplodono i calcoli
     def _series_or_nan(col):
         if col is None or col not in df.columns:
             return pd.Series([np.nan] * len(df), index=df.index, dtype="float")
-        # coercion robusta: gestisce stringhe, virgole, ecc.
         s = pd.to_numeric(df[col].astype(str).str.replace(",", ".", regex=False), errors="coerce")
         return s
 
-    # Home / Away totali e SOT
     H_tot  = _series_or_nan(h_tot)
     A_tot  = _series_or_nan(a_tot)
     H_sot  = _series_or_nan(h_sot)
     A_sot  = _series_or_nan(a_sot)
 
-    # Dal punto di vista della squadra (side)
     if side == "Home":
-        sf   = H_tot
-        sa   = A_tot
-        sotf = H_sot
-        sota = A_sot
+        sf, sa, sotf, sota = H_tot, A_tot, H_sot, A_sot
     else:
-        sf   = A_tot
-        sa   = H_tot
-        sotf = A_sot
-        sota = H_sot
+        sf, sa, sotf, sota = A_tot, H_tot, A_sot, H_sot
 
-    pace_avg = np.nanmean(sf + sa)  # media tiri totali per match
+    pace_avg = np.nanmean(sf + sa)
     return {
         "shots_for":    float(np.nansum(sf)),
         "shots_against":float(np.nansum(sa)),
@@ -563,38 +537,33 @@ def _style_rhythm_block(df: pd.DataFrame, team: str, side: str):
     if df_side.empty:
         return None
 
-    # Coercion numerica sui gol
     gf = pd.to_numeric(df_side[gf_col], errors="coerce").fillna(0)
     ga = pd.to_numeric(df_side[ga_col], errors="coerce").fillna(0)
 
     shots = _shots(df_side, side)
 
-    # Conversione: gol / SOT (solo se SOT>0)
     sot_for = shots["sot_for"]
     conv = np.nan
     if sot_for and sot_for > 0:
         conv = float(gf.sum()) / float(sot_for)
 
-    # Save% approx: 1 - gol subiti / SOT contro (solo se SOT contro >0)
     sot_ag = shots["sot_against"]
     savep = np.nan
     if sot_ag and sot_ag > 0:
         savep = 1.0 - (float(ga.sum()) / float(sot_ag))
 
     n = int(len(df_side))
-    # Pace per match: media tiri totali (for+against)
     pace_pm = shots["pace_avg"]
 
-    # BTTS / Over 2.5 (percentuali)
     btts = ((pd.to_numeric(df_side["Home Goal FT"], errors="coerce") > 0) &
             (pd.to_numeric(df_side["Away Goal FT"], errors="coerce") > 0)).mean()
     over25 = ((pd.to_numeric(df_side["Home Goal FT"], errors="coerce") +
                pd.to_numeric(df_side["Away Goal FT"], errors="coerce")) > 2.5).mean()
 
     return {
-        "pace": pace_pm,                     # tiri totali per match
-        "conv": conv,                        # frazione (es. 0.25 → 25%)
-        "save": savep,                       # frazione (es. 0.70 → 70%)
+        "pace": pace_pm,
+        "conv": conv,
+        "save": savep,
         "btts": float(0 if np.isnan(btts) else btts),
         "over25": float(0 if np.isnan(over25) else over25),
         "n": n,
@@ -715,7 +684,6 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
 
         dfm = pd.DataFrame([base])
 
-        # --- Stile + FORMATTING numerico con segno e decimali (fix "+.1f") ---
         sty = _df_style_positive_negative(
             dfm,
             pos_good_cols=["Δ Win%","Δ GF","Δ ELO","Δ Form"],
@@ -731,7 +699,6 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
             "N (ultime)": "{:.0f}",
             "N (tot)":    "{:.0f}",
         })
-        # ----------------------------------------------------------------------
 
         st.caption(
             f"**{title}** — campione: {base['N (tot)']} • recenti: {base['N (ultime)']} • affidabilità: {base['Affidabilità']}"
@@ -834,7 +801,6 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
                             "Brier":      st.column_config.NumberColumn(format="%.4f"),
                         },
                     )
-                    # Chart robusto senza transform_fold
                     df_long = dfc.melt(
                         id_vars=["Bin Quota"],
                         value_vars=["Implied %", "Observed %"],
@@ -1165,7 +1131,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             _download_df_button(df_comp.reset_index(), "macro_kpi.csv", "⬇️ Scarica Macro KPI CSV")
 
         st.divider()
-        # KPI PLUS — tabelle professionali
         render_macro_kpi_plus(df_league_all, squadra_casa, squadra_ospite)
 
     # === TAB 2: ROI mercati ===
@@ -1261,7 +1226,7 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         base_cols = ["Home Goal FT","Away Goal FT"]
         home_ctx_light = df_home_ctx[base_cols].copy()
         away_ctx_light = df_away_ctx[base_cols].copy()
-        h2h_light       = df_h2h[base_cols].copy()
+        h2h_light      = df_h2h[base_cols].copy()
 
         df_ev_squadre, best = _build_ev_table_cached(
             home_ctx_light, away_ctx_light, h2h_light, squadra_casa, squadra_ospite,
@@ -1310,7 +1275,6 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
     # === TAB 4: Statistiche squadre ===
     with tab_stats:
         st.subheader("Statistiche squadre")
-        # Filtro stagioni SOLO per questa sezione (default stagione corrente)
         if "Stagione" in df_league_all.columns:
             seasons_desc = _seasons_desc(df_league_all["Stagione"].dropna().unique().tolist())
         else:
