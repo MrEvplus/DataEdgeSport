@@ -1320,27 +1320,17 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
         else:
             seasons_desc = []
         with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
-	    seasons_all = []
-                              if "Stagione" in df_league_all.columns:
-	                    seasons_all = sorted(
-            					df_league_all["Stagione"].dropna().astype(str).unique(),
-            					key=_season_sort_key, reverse=True
-        				)
-
-	# default = sempre la stagione più recente (prima in lista)
-	seasons_default = [seasons_all[0]] if seasons_all else []
-
-	sel_seasons = st.multiselect(
-	    "Scegli le stagioni da includere (se vuoto = tutte)",
-	    options=seasons_all,
-	        default=seasons_default,       # default solo al primo render
-	        key="teamstats:seasons"
-    		  )
-
-# applica il filtro SOLO a questa sezione
-df_team_scope = df_league_all.copy()
-if sel_seasons:
-    df_team_scope = df_team_scope[df_team_scope["Stagione"].astype(str).isin([str(s) for s in sel_seasons])]
+            default_curr = _pick_current_season(seasons_desc) if seasons_desc else []
+            selected_stats_seasons = st.multiselect(
+                "Scegli le stagioni da includere (se vuoto = tutte)",
+                options=seasons_desc,
+                default=default_curr,
+                key=_k("stats_seasons_filter"),
+            )
+        df_stats_scope = df_league_all.copy()
+        if selected_stats_seasons:
+            df_stats_scope = df_stats_scope[df_stats_scope["Stagione"].astype(str).isin([str(s) for s in selected_stats_seasons])]
+        render_team_stats_tab(df_stats_scope, league, squadra_casa, squadra_ospite)
 
     # === TAB 5: Correct Score ===
     with tab_cs:
