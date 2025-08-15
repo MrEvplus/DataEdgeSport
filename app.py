@@ -227,6 +227,15 @@ st.caption(f"Origine dati: **{db_short}** · <span class='tiny-badge'>Righe cari
 # ---------- menu ----------
 st.sidebar.markdown("<div class='sb-title'>Naviga</div>", unsafe_allow_html=True)
 menu = st.sidebar.radio("", ["Pre-Match (Hub)", "Upcoming"], key="menu_principale")
+# Se Upcoming ha chiesto il redirect, forza il tab e riparti
+if st.session_state.get("__goto_prematch__"):
+    st.session_state.pop("__goto_prematch__", None)
+    if menu != "Pre-Match (Hub)":
+        st.session_state["menu_principale"] = "Pre-Match (Hub)"
+        st.rerun()
+    else:
+        menu = "Pre-Match (Hub)"
+
 
 # ---------- routing ----------
 if menu == "Pre-Match (Hub)":

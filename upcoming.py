@@ -558,8 +558,6 @@ def render_upcoming(df_current: pd.DataFrame, db_selected_label: str, run_pre_ma
         if row.get("Over 2.5") is not None: st.session_state["prematch:shared:q_ov25"] = float(row["Over 2.5"])
         if row.get("Over 3.5") is not None: st.session_state["prematch:shared:q_ov35"] = float(row["Over 3.5"])
         if row.get("BTTS")     is not None: st.session_state["prematch:shared:q_btts"] = float(row["BTTS"])
-        st.success("Impostazioni caricate: campionato, squadre e quote.")
-        try:
-            run_pre_match_cb(df_all, db_selected_label or "Dataset")
-        except Exception as e:
-            st.error(f"Errore nell'apertura del Pre-Match: {e}")
+        st.session_state["menu_principale"] = "Pre-Match (Hub)"
+	st.session_state["__goto_prematch__"] = True
+	st.rerun()
