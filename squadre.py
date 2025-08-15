@@ -17,6 +17,8 @@ except Exception as _e:
     st.error("Modulo `ev_tables.py` non trovato o non importabile. Assicurati di aver creato/posizionato `ev_tables.py` accanto ai moduli.")
     raise
 
+# ========= Minuti-gol centralizzati =========
+from minutes import unify_goal_minute_columns, parse_goal_times
 
 # =========================================================
 # Helpers generali
@@ -63,7 +65,6 @@ def _quality_label(n: int) -> str:
         return "MEDIO"
     return "BASSO"
 
-
 # =========================================================
 # Quote condivise (sincronizzate con pre_match)
 # =========================================================
@@ -86,14 +87,12 @@ def _get_shared_quotes() -> dict:
         "btts": float(st.session_state[_shared_key("btts")]),
     }
 
-
 # =========================================================
 # Entry point classico (facoltativo)
 # =========================================================
 def run_team_stats(df: pd.DataFrame, db_selected: str):
     st.header("📊 Statistiche per Squadre")
     _render_setup_and_body(df, db_selected, is_embedded=False)
-
 
 # =========================================================
 # Entry point per TAB su Confronto pre-match
@@ -112,50 +111,9 @@ def render_team_stats_tab(
         squadra_ospite=squadra_ospite,
     )
 
-
 # =========================================================
 # Corpo pagina/tab
 # =========================================================
-
-# PATCH ───────────────────────────────────────────────────
-# Alcuni dataset usano colonne alternative per i minuti-gol.
-# Le riconduciamo ai nostri standard:
-#   - minuti goal segnato home
-#   - minuti goal segnato away
-def _unify_minute_columns(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    alt_home = [
-        "minuti goal segnato home", "Minuti Goal Home", "Minuti Gol Casa",
-        "minuti_gol_home", "minuti_gol_casa"
-    ]
-    alt_away = [
-        "minuti goal segnato away", "Minuti Goal Away", "Minuti Gol Trasferta",
-        "minuti_gol_away", "minuti_gol_trasferta"
-    ]
-    # home
-    if "minuti goal segnato home" not in df.columns:
-        for c in alt_home:
-            if c in df.columns:
-                df["minuti goal segnato home"] = df[c].fillna("").astype(str)
-                break
-        else:
-            df["minuti goal segnato home"] = ""
-    else:
-        df["minuti goal segnato home"] = df["minuti goal segnato home"].fillna("").astype(str)
-    # away
-    if "minuti goal segnato away" not in df.columns:
-        for c in alt_away:
-            if c in df.columns:
-                df["minuti goal segnato away"] = df[c].fillna("").astype(str)
-                break
-        else:
-            df["minuti goal segnato away"] = ""
-    else:
-        df["minuti goal segnato away"] = df["minuti goal segnato away"].fillna("").astype(str)
-    return df
-# PATCH END ───────────────────────────────────────────────
-
-
 def _render_setup_and_body(
     df: pd.DataFrame,
     db_selected: str,
@@ -172,8 +130,8 @@ def _render_setup_and_body(
 
     _init_shared_quotes()  # ➜ quote condivise pronte
 
-    # PATCH: uniformiamo subito le colonne dei minuti-gol
-    df = _unify_minute_columns(df)
+    # NORMALIZZA SUBITO LE COLONNE DEI MINUTI-GOL (centralizzato)
+    df = unify_goal_minute_columns(df)
 
     df = df.copy()
     df["country"] = _ensure_str_with_unknown(df["country"], "Unknown").str.strip().str.upper()
@@ -396,7 +354,6 @@ def _render_setup_and_body(
         },
     )
 
-
 # =========================================================
 # Macro stats per singola squadra
 # =========================================================
@@ -438,7 +395,6 @@ def compute_team_macro_stats(df: pd.DataFrame, team: str, venue: str) -> dict:
         "BTTS %": round(btts, 2),
     }
 
-
 # =========================================================
 # Match giocato?
 # =========================================================
@@ -451,38 +407,11 @@ def is_match_played(row) -> bool:
     ag = row.get("Away Goal FT", None)
     return pd.notna(hg) and pd.notna(ag)
 
-
 # =========================================================
-# Timeline / parse minuti
+# Timeline (usa parse_goal_times dal modulo minutes)
 # =========================================================
-# PATCH: parser molto più robusto (gestisce 90+2, virgole, spazi, parentesi)
-def parse_goal_times(val):
-    if pd.isna(val):
-        return []
-    s = str(val).strip()
-    if s == "":
-        return []
-    s = s.replace(",", ";").replace("[", "").replace("]", "")
-    out = []
-    for part in s.split(";"):
-        p = part.strip()
-        if p == "":
-            continue
-        if "+" in p:
-            try:
-                base, add = p.split("+", 1)
-                out.append(int(float(base)) + int(float(add)))
-            except Exception:
-                continue
-        else:
-            try:
-                out.append(int(float(p)))
-            except Exception:
-                continue
-    # limiti ragionevoli
-    out = [m for m in out if 0 < m <= 130]
-    return out
-# PATCH END
+def timeframes():
+    return [(0, 15), (16, 30), (31, 45), (46, 60), (61, 75), (76, 120)]
 
 def build_timeline(row, venue):
     try:
@@ -494,6 +423,7 @@ def build_timeline(row, venue):
             tl.sort(key=lambda x: x[1])
             return tl
 
+        # fallback: se mancano i minuti ma ho i FT, creo eventi "sintetici"
         hg_raw = row.get("Home Goal FT", 0)
         ag_raw = row.get("Away Goal FT", 0)
         hg = int(hg_raw) if pd.notna(hg_raw) else 0
@@ -503,16 +433,8 @@ def build_timeline(row, venue):
     except Exception:
         return []
 
-
 # =========================================================
-# Timeframes
-# =========================================================
-def timeframes():
-    return [(0, 15), (16, 30), (31, 45), (46, 60), (61, 75), (76, 120)]
-
-
-# =========================================================
-# Goal pattern computation
+# Goal pattern computation / grafica / utils (immutato)
 # =========================================================
 def compute_goal_patterns(df_team: pd.DataFrame, venue: str, total_matches: int):
     if total_matches == 0:
@@ -649,10 +571,6 @@ def _tf_to_pct(tf_dict: dict[str, int]) -> dict[str, float]:
     tot = sum(tf_dict.values())
     return {k: round((v / tot) * 100, 2) if tot > 0 else 0 for k, v in tf_dict.items()}
 
-
-# =========================================================
-# HTML goal pattern table
-# =========================================================
 def _build_goal_pattern_html(patterns: dict, team: str, color_hex: str) -> str:
     def bar_html(value: float, color: str, width_max: int = 90) -> str:
         width = int(width_max * float(value) / 100.0) if isinstance(value, (int, float)) else 0
@@ -679,10 +597,6 @@ def _build_goal_pattern_html(patterns: dict, team: str, color_hex: str) -> str:
     )
     return html
 
-
-# =========================================================
-# Grafico fasce minuto
-# =========================================================
 def plot_timeframe_goals(tf_scored, tf_conceded, tf_scored_pct, tf_conceded_pct, team):
     data = []
     keys = list(tf_scored.keys())
@@ -710,10 +624,6 @@ def plot_timeframe_goals(tf_scored, tf_conceded, tf_scored_pct, tf_conceded_pct,
     )
     return chart + text
 
-
-# =========================================================
-# Goal pattern keys
-# =========================================================
 def goal_pattern_keys():
     keys = [
         "P", "Win %", "Draw %", "Loss %", "First Goal %", "Last Goal %",
@@ -735,10 +645,6 @@ def goal_pattern_keys_without_tf():
         "H 2nd %", "D 2nd %", "A 2nd %",
     ]
 
-
-# =========================================================
-# Totale patterns (Home+Away pesati)
-# =========================================================
 def compute_goal_patterns_total(patterns_home, patterns_away, total_home_matches, total_away_matches):
     total_matches = total_home_matches + total_away_matches
     total = {}
@@ -762,10 +668,6 @@ def compute_goal_patterns_total(patterns_home, patterns_away, total_home_matches
             total[key] = round(val, 2)
     return total
 
-
-# =========================================================
-# EV storico: best card (il calcolo è centralizzato in ev_tables)
-# =========================================================
 def _best_ev_card(best: dict):
     bg = "#052e16"
     st.markdown(
@@ -788,10 +690,6 @@ def _best_ev_card(best: dict):
         unsafe_allow_html=True,
     )
 
-
-# =========================================================
-# Stand-alone di compatibilità (se usati altrove)
-# =========================================================
 def show_team_macro_stats(df, team, venue):
     stats = compute_team_macro_stats(df, team, venue)
     if not stats:
@@ -850,3 +748,4 @@ def show_goal_patterns(df, team1, team2, country, stagione):
     if patterns_away:
         ca = plot_timeframe_goals(tf_scored_away, tf_conceded_away, tf_scored_away_pct, tf_conceded_away_pct, team2)
         st.altair_chart(ca, use_container_width=True)
+
