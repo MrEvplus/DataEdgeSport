@@ -558,6 +558,8 @@ def render_upcoming(df_current: pd.DataFrame, db_selected_label: str, run_pre_ma
         if row.get("Over 2.5") is not None: st.session_state["prematch:shared:q_ov25"] = float(row["Over 2.5"])
         if row.get("Over 3.5") is not None: st.session_state["prematch:shared:q_ov35"] = float(row["Over 3.5"])
         if row.get("BTTS")     is not None: st.session_state["prematch:shared:q_btts"] = float(row["BTTS"])
+
+        # redirect al Pre-Match
         st.session_state["menu_principale"] = "Pre-Match (Hub)"
-	st.session_state["__goto_prematch__"] = True
-	st.rerun()
+        st.session_state["__goto_prematch__"] = True
+        st.rerun()
