@@ -1,10 +1,12 @@
-# app.py — ProTrader Hub (Supabase filtrato + UI raffinata + preset stagioni + fix session_state + fix colonna 'sezonul')
+# app.py — ProTrader Hub (Supabase filtrato + UI raffinata + preset stagioni + fix session_state + fix colonna 'sezonul' + 📅 Upcoming)
 from __future__ import annotations
 
 import os
 import sys
 import re
 import importlib.util
+import unicodedata
+from datetime import datetime
 import streamlit as st
 import pandas as pd
 
@@ -239,13 +241,11 @@ if origine_dati == "Supabase":
     st.session_state[GLOBAL_SEASONS_KEY] = list(chosen_seasons) if isinstance(chosen_seasons, (list, tuple)) else []
 
     # --- Selettore rapido stagioni (presets) ---
-    # 1) prova a leggere l'elenco stagioni dai keys esposti da utils
     seasons_options = None
     for k in ("campionato_supabase__seasons_all", "campionato_supabase__seasons_choices", "supabase_seasons_choices"):
         if k in st.session_state and st.session_state[k]:
             seasons_options = [str(x) for x in st.session_state[k]]
             break
-    # 2) fallback: leggi dal df ancora NON mappato: 'Stagione' o 'sezonul'
     if seasons_options is None:
         if "Stagione" in df.columns:
             seasons_options = sorted(df["Stagione"].dropna().astype(str).unique())
@@ -270,7 +270,7 @@ if origine_dati == "Supabase":
         # Aggiorna filtri GLOBALI (list)
         st.session_state[GLOBAL_SEASONS_KEY] = list(sel_seasons)
 
-        # Prova ad aggiornare anche il widget Supabase rispettando il TIPO corrente
+        # Allinea anche il widget Supabase, se possibile
         wkey = "campionato_supabase__seasons"
         if wkey in st.session_state:
             cur_val = st.session_state[wkey]
@@ -282,8 +282,7 @@ if origine_dati == "Supabase":
             except Exception:
                 pass
 
-        # Filtra localmente il DF (coerente col preset); la prossima lettura server-side userà il widget
-        # NB: qui il df può avere ancora 'sezonul' come nome colonna
+        # Filtra localmente il DF coerentemente col preset
         season_col = "Stagione" if "Stagione" in df.columns else ("sezonul" if "sezonul" in df.columns else None)
         if season_col and sel_seasons:
             df = df[df[season_col].astype(str).isin([str(s) for s in sel_seasons])]
@@ -429,6 +428,249 @@ except Exception as e:
     st.warning(f"Normalizzazione minuti-gol non applicata: {e}")
 
 # -------------------------------------------------------
+# 📅 UPCOMING — helpers & UI
+# -------------------------------------------------------
+def _norm(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+def _guess_col(cols, candidates):
+    cset = [_norm(c) for c in candidates]
+    for c in cols:
+        nc = _norm(c)
+        if nc in cset:
+            return c
+    # fuzzy contains
+    for c in cols:
+        nc = _norm(c)
+        if any(k in nc for k in cset):
+            return c
+    return None
+
+def _coerce_odd(x):
+    try:
+        return float(str(x).replace(",", "."))
+    except Exception:
+        return None
+
+def _read_upcoming_file(uploaded_file) -> pd.DataFrame:
+    name = (uploaded_file.name or "").lower()
+    if name.endswith(".csv"):
+        dfu = pd.read_csv(uploaded_file)
+    elif name.endswith(".parquet"):
+        dfu = pd.read_parquet(uploaded_file)
+    else:
+        # Excel (.xls/.xlsx) — per .xls serve xlrd
+        try:
+            dfu = pd.read_excel(uploaded_file)
+        except Exception:
+            dfu = pd.read_excel(uploaded_file, engine="xlrd")
+    return dfu
+
+def _auto_map_upcoming(df_in: pd.DataFrame) -> dict:
+    cols = list(df_in.columns)
+    M = {}
+    M["league"] = _guess_col(cols, ["league","campionato","compet","country","liga","camp","competition"])
+    M["date"]   = _guess_col(cols, ["date","data","matchdate"])
+    M["time"]   = _guess_col(cols, ["time","ora","orario","hour"])
+    M["home"]   = _guess_col(cols, ["home","team1","txtechipa1","echipa1","gazde","casa"])
+    M["away"]   = _guess_col(cols, ["away","team2","txtechipa2","echipa2","ospiti","trasferta"])
+    M["odd1"]   = _guess_col(cols, ["1","oddhome","homeodds","cotaa","odds1","cota1","home"])
+    M["oddx"]   = _guess_col(cols, ["x","draw","odddraw","cotae","oddsx"])
+    M["odd2"]   = _guess_col(cols, ["2","oddaway","awayodds","cotad","odds2","away"])
+    M["ov15"]   = _guess_col(cols, ["over15","over 1.5","o1.5","cotao1"])
+    M["ov25"]   = _guess_col(cols, ["over25","over 2.5","o2.5","cotao","cotao2"])
+    M["ov35"]   = _guess_col(cols, ["over35","over 3.5","o3.5","cotao3"])
+    M["btts"]   = _guess_col(cols, ["btts","both teams to score","gg","gg/no"])
+    return M
+
+def _resolve_dataset_country(df_global: pd.DataFrame, league_str: str) -> str:
+    if "country" not in df_global.columns or df_global.empty:
+        return str(league_str or "")
+    options = sorted(set(df_global["country"].dropna().astype(str)))
+    s = _norm(league_str)
+    for o in options:
+        if _norm(o) == s:
+            return o
+    for o in options:
+        if s and (_norm(o).find(s) >= 0 or s.find(_norm(o)) >= 0):
+            return o
+    return options[0] if options else str(league_str or "")
+
+def _to_datetime_safe(datestr, timestr):
+    try:
+        if pd.isna(datestr) and pd.isna(timestr):
+            return None
+        if isinstance(datestr, (pd.Timestamp, datetime)):
+            dt = pd.to_datetime(datestr)
+        else:
+            dt = pd.to_datetime(str(datestr), errors="coerce", dayfirst=True, utc=False)
+        if pd.isna(dt):
+            return None
+        t = str(timestr or "").strip()
+        if t and t not in ("", "nan"):
+            try:
+                tt = pd.to_datetime(t).time()
+            except Exception:
+                t = t.replace(".", ":")
+                if re.fullmatch(r"\d{4}", t):  # 1730 -> 17:30
+                    t = t[:2] + ":" + t[2:]
+                tt = pd.to_datetime(t, errors="coerce").time()
+            if tt:
+                dt = pd.to_datetime(f"{dt.date()} {tt}")
+        return dt
+    except Exception:
+        return None
+
+def render_upcoming(df_global: pd.DataFrame, db_selected_label: str):
+    st.title("📅 Upcoming — partite del giorno (quote auto-import)")
+
+    up = st.file_uploader("Carica il file quotidiano (Excel/CSV)", type=["xls","xlsx","csv","parquet"], key="upcoming_upl")
+    if up is None:
+        st.info("Carica il file della giornata per vedere la lista dei match.")
+        return
+
+    try:
+        dfu = _read_upcoming_file(up)
+    except Exception as e:
+        st.error(f"Impossibile leggere il file: {e}")
+        return
+
+    if dfu is None or dfu.empty:
+        st.warning("Il file è vuoto.")
+        return
+
+    # Mappatura colonne (auto + override)
+    auto = _auto_map_upcoming(dfu)
+    with st.expander("🔧 Mappatura colonne (controlla/correggi se necessario)", expanded=True):
+        cols = list(dfu.columns)
+        if not cols:
+            st.warning("Nessuna colonna trovata nel file.")
+            return
+        c1,c2,c3,c4 = st.columns(4)
+        with c1:
+            col_league = st.selectbox("Lega/Campionato", options=cols, index=cols.index(auto["league"]) if auto.get("league") in cols else 0)
+            col_date   = st.selectbox("Data", options=cols, index=cols.index(auto["date"])   if auto.get("date")   in cols else 0)
+            col_time   = st.selectbox("Ora",  options=cols, index=cols.index(auto["time"])   if auto.get("time")   in cols else 0)
+        with c2:
+            col_home   = st.selectbox("Squadra Casa", options=cols, index=cols.index(auto["home"]) if auto.get("home") in cols else 0)
+            col_away   = st.selectbox("Squadra Ospite", options=cols, index=cols.index(auto["away"]) if auto.get("away") in cols else 0)
+        with c3:
+            col_1      = st.selectbox("Quota 1", options=cols, index=cols.index(auto["odd1"]) if auto.get("odd1") in cols else 0)
+            col_x      = st.selectbox("Quota X", options=cols, index=cols.index(auto["oddx"]) if auto.get("oddx") in cols else 0)
+            col_2      = st.selectbox("Quota 2", options=cols, index=cols.index(auto["odd2"]) if auto.get("odd2") in cols else 0)
+        with c4:
+            col_ov15   = st.selectbox("Over 1.5 (facolt.)", options=["(nessuna)"]+cols, index=(cols.index(auto["ov15"])+1) if auto.get("ov15") in cols else 0)
+            col_ov25   = st.selectbox("Over 2.5 (facolt.)", options=["(nessuna)"]+cols, index=(cols.index(auto["ov25"])+1) if auto.get("ov25") in cols else 0)
+            col_ov35   = st.selectbox("Over 3.5 (facolt.)", options=["(nessuna)"]+cols, index=(cols.index(auto["ov35"])+1) if auto.get("ov35") in cols else 0)
+            col_btts   = st.selectbox("BTTS (facolt.)",     options=["(nessuna)"]+cols, index=(cols.index(auto["btts"])+1) if auto.get("btts") in cols else 0)
+
+    # Normalizza in uno schema unico
+    def _pick(row, colname):
+        return row[colname] if (colname and colname in row) else None
+
+    records = []
+    for _, r in dfu.iterrows():
+        league = _pick(r, col_league)
+        dt = _to_datetime_safe(_pick(r, col_date), _pick(r, col_time))
+        home = str(_pick(r, col_home) or "").strip()
+        away = str(_pick(r, col_away) or "").strip()
+        o1   = _coerce_odd(_pick(r, col_1))
+        ox   = _coerce_odd(_pick(r, col_x))
+        o2   = _coerce_odd(_pick(r, col_2))
+        ov15 = None if col_ov15 == "(nessuna)" else _coerce_odd(_pick(r, col_ov15))
+        ov25 = None if col_ov25 == "(nessuna)" else _coerce_odd(_pick(r, col_ov25))
+        ov35 = None if col_ov35 == "(nessuna)" else _coerce_odd(_pick(r, col_ov35))
+        btts = None if col_btts == "(nessuna)" else _coerce_odd(_pick(r, col_btts))
+        if not home or not away:
+            continue
+        records.append({
+            "LeagueRaw": league,
+            "Datetime": dt,
+            "Home": home,
+            "Away": away,
+            "Odd home": o1,
+            "Odd Draw": ox,
+            "Odd Away": o2,
+            "Over 1.5": ov15,
+            "Over 2.5": ov25,
+            "Over 3.5": ov35,
+            "BTTS": btts,
+        })
+
+    if not records:
+        st.warning("Nessun match valido trovato nel file.")
+        return
+
+    df_up = pd.DataFrame(records)
+    if "Datetime" in df_up.columns:
+        df_up = df_up.sort_values("Datetime", na_position="last")
+
+    st.subheader("Lista partite")
+    show = df_up.copy()
+    show["Data/Ora"] = show["Datetime"].astype(str).str.slice(0,16)
+    st.dataframe(
+        show[["Data/Ora","LeagueRaw","Home","Away","Odd home","Odd Draw","Odd Away","Over 1.5","Over 2.5","Over 3.5","BTTS"]],
+        use_container_width=True,
+        height=min(420, 44*(len(show)+1))
+    )
+
+    # Selezione match
+    label_opts = []
+    for i, r in df_up.iterrows():
+        dts = r["Datetime"].strftime("%Y-%m-%d %H:%M") if pd.notna(r["Datetime"]) else "—"
+        leg = str(r["LeagueRaw"] or "").strip()
+        label_opts.append(f"[{dts}] {r['Home']} vs {r['Away']}  —  {leg}")
+
+    sel = st.selectbox("Seleziona un match per aprire l'analisi", options=label_opts, index=0 if label_opts else None, key="upcoming_pick")
+    if not sel:
+        return
+
+    idx = label_opts.index(sel)
+    row = df_up.iloc[idx]
+
+    # Risolvi il campionato del dataset (colonna 'country') a partire da LeagueRaw
+    league_guess = _resolve_dataset_country(df_global, str(row["LeagueRaw"]))
+    countries = sorted(df_global["country"].dropna().astype(str).unique()) if "country" in df_global.columns else []
+    st.caption("Associa il match al campionato presente nel tuo dataset (colonna ‘country’).")
+    target_country = st.selectbox(
+        "Campionato dataset",
+        options=countries or [league_guess],
+        index=(countries.index(league_guess) if league_guess in countries else 0),
+        key="upcoming_dataset_country"
+    )
+
+    # Pulsante per aprire l'analisi pre-match con quote importate
+    if st.button("🚀 Apri in Pre-Match (quote autocaricate)", type="primary", use_container_width=True, key="open_prematch"):
+        # 1) Filtro globale campionato
+        st.session_state[GLOBAL_CHAMP_KEY] = str(target_country)
+
+        # 2) Squadre selezionate
+        st.session_state["prematch:squadra_casa"]   = str(row["Home"])
+        st.session_state["prematch:squadra_ospite"] = str(row["Away"])
+
+        # 3) Quote 1X2
+        if row["Odd home"] is not None: st.session_state["prematch:quota_home"] = float(row["Odd home"])
+        if row["Odd Draw"] is not None: st.session_state["prematch:quota_draw"] = float(row["Odd Draw"])
+        if row["Odd Away"] is not None: st.session_state["prematch:quota_away"] = float(row["Odd Away"])
+
+        # 4) Quote Over/BTTS (se presenti)
+        if row.get("Over 1.5") is not None: st.session_state["prematch:shared:q_ov15"] = float(row["Over 1.5"])
+        if row.get("Over 2.5") is not None: st.session_state["prematch:shared:q_ov25"] = float(row["Over 2.5"])
+        if row.get("Over 3.5") is not None: st.session_state["prematch:shared:q_ov35"] = float(row["Over 3.5"])
+        if row.get("BTTS")     is not None: st.session_state["prematch:shared:q_btts"] = float(row["BTTS"])
+
+        st.success("Impostazioni caricate: campionato, squadre e quote.")
+        # Apri subito il modulo Pre-Match sul DF attuale
+        try:
+            run_pre_match(df_global, _db_label_for_modules())
+        except Exception as e:
+            st.error(f"Errore nell'apertura del Pre-Match: {e}")
+
+# -------------------------------------------------------
 # HEADER & BADGES
 # -------------------------------------------------------
 st.title("📊 Pre-Match — Hub")
@@ -437,13 +679,16 @@ db_short = _short_origin_label(str(db_selected))
 st.caption(f"Origine dati: **{db_short}** · <span class='tiny-badge'>Righe caricate: {len(df):,}</span>", unsafe_allow_html=True)
 
 # -------------------------------------------------------
-# MENU (solo Hub)
+# MENU (Hub)
 # -------------------------------------------------------
 st.sidebar.markdown("<div class='sb-title'>Naviga</div>", unsafe_allow_html=True)
-menu_option = st.sidebar.radio("", ["Pre-Match (Hub)"], key="menu_principale")
+menu_option = st.sidebar.radio("", ["Pre-Match (Hub)", "Upcoming"], key="menu_principale")
 
 # -------------------------------------------------------
 # ROUTING
 # -------------------------------------------------------
 if menu_option == "Pre-Match (Hub)":
     run_pre_match(df, _db_label_for_modules())
+elif menu_option == "Upcoming":
+    # Passo il DF attuale (filtrato dai preset) così l'analisi apre nel contesto giusto
+    render_upcoming(df.copy(), _db_label_for_modules())
