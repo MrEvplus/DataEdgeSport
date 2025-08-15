@@ -669,7 +669,7 @@ def _legend_badges():
 def run_live_minute_analysis(df: pd.DataFrame):
     st.set_page_config(page_title="Analisi Live Minuto — ProTrader", layout="wide")
     _inject_css()
-    st.title(⏱️ Analisi Live — ProTrader Suite")
+    st.title("⏱️ Analisi Live — ProTrader Suite")
 
     tab_setup, tab_ev, tab_camp, tab_team, tab_signals = st.tabs(
         ["🎛️ Setup", "🧠 EV Advisor", "🏆 Campionato (stesso stato)", "📈 Squadra focus", "🧩 Segnali"]
