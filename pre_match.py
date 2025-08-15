@@ -1,10 +1,11 @@
-# pre_match.py — versione PRO consolidata
+# pre_match.py — versione PRO consolidata (EV centralizzato)
 # - Macro KPI Plus con tabelle professionali
 # - EV/ROI con glossari e stile
 # - Statistiche Squadre: filtro solo per la sezione (default stagione corrente)
 # - Live: passaggio contesto + badge
 # - Fix robustezza: _first_present, _calc_market_roi
 # - Calibrazione 1X2: chart Altair robusto senza transform_fold
+# - NEW: EV storico importato da ev_tables.py con fallback locale
 
 from __future__ import annotations
 
@@ -58,12 +59,20 @@ except Exception:
             return "A_MediumFav 1.5-2"
         return "Others"
 
+# ========= NEW: EV centralizzato da ev_tables con fallback =========
+try:
+    from ev_tables import (
+        build_ev_table as _build_ev_table,
+        build_ev_table_cached as _build_ev_table_cached,
+    )
+    _EV_FROM_MODULE = True
+except Exception:
+    _EV_FROM_MODULE = False
 
 # ========= Config HUB =========
 USE_GLOBAL_FILTERS = True
 GLOBAL_CHAMP_KEY   = "global_country"
 GLOBAL_SEASONS_KEY = "global_seasons"   # lista stagioni (HUB)
-
 
 # ========= Altair Theme =========
 def _alt_theme():
@@ -81,7 +90,6 @@ try:
     alt.themes.enable("app_theme")
 except Exception:
     pass
-
 
 # ========= Helper generali =========
 def _k(name: str) -> str:
@@ -154,7 +162,6 @@ def _set_qparams(**kwargs):
     except Exception:
         st.experimental_set_query_params(**qp)
 
-
 # ========= Stagioni helpers =========
 def _season_sort_key(s: str) -> int:
     if not isinstance(s, str):
@@ -187,7 +194,6 @@ def _pick_current_season(seasons_desc: list[str]) -> list[str]:
             return [s]
     return seasons_desc[:1]
 
-
 # ========= Quote condivise (sincronizzate tra tab) =========
 _SHARED_PREFIX = "prematch:shared:"
 
@@ -219,7 +225,6 @@ def _get_shared_quotes() -> dict:
         "btts": float(st.session_state[_shared_key("btts")]),
     }
 
-
 # ========= League data by Label + cache =========
 @st.cache_data(show_spinner=False, ttl=900)
 def _league_data_by_label_cached(df_light: pd.DataFrame, label: str | None) -> dict | None:
@@ -243,7 +248,6 @@ def _league_data_by_label_cached(df_light: pd.DataFrame, label: str | None) -> d
     else:
         row = group
     return row.iloc[0].to_dict() if not row.empty else None
-
 
 # ========= Back/Lay 1x2 + cache =========
 def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
@@ -301,7 +305,6 @@ def _calc_back_lay_1x2(df: pd.DataFrame, commission: float = 0.0):
 @st.cache_data(show_spinner=False, ttl=900)
 def _calc_back_lay_1x2_cached(df_light: pd.DataFrame, commission: float = 0.0):
     return _calc_back_lay_1x2(df_light.copy(), commission)
-
 
 # ========= ROI Over/BTTS + cache (robusto) =========
 def _calc_market_roi(df: pd.DataFrame, market: str, price_cols,
@@ -364,78 +367,6 @@ def _calc_market_roi(df: pd.DataFrame, market: str, price_cols,
 def _calc_market_roi_cached(df_light: pd.DataFrame, market: str, price_cols: tuple[str, ...],
                             line: float | None, commission: float, manual_price: float | None):
     return _calc_market_roi(df_light.copy(), market, list(price_cols), line, commission, manual_price)
-
-
-# ========= Probabilità storiche per EV =========
-def _market_prob(df: pd.DataFrame, market: str, line: float | None) -> float:
-    if df.empty:
-        return 0.0
-    hg = pd.to_numeric(df["Home Goal FT"], errors="coerce").fillna(0)
-    ag = pd.to_numeric(df["Away Goal FT"], errors="coerce").fillna(0)
-    goals = hg + ag
-    if market == "BTTS":
-        ok = ((hg > 0) & (ag > 0)).mean()
-    else:
-        ok = (goals > float(line)).mean() if line is not None else 0.0
-    return round(float(ok) * 100, 2)
-
-def _quality_label(n: int) -> str:
-    if n >= 50: return "ALTO"
-    if n >= 20: return "MEDIO"
-    return "BASSO"
-
-
-# ========= EV storico – tabella + Best EV =========
-def _build_ev_table(df_home_ctx: pd.DataFrame, df_away_ctx: pd.DataFrame, df_h2h: pd.DataFrame,
-                    squadra_casa: str, squadra_ospite: str,
-                    quota_ov15: float, quota_ov25: float, quota_ov35: float, quota_btts: float):
-    markets = [("Over 1.5", 1.5, quota_ov15), ("Over 2.5", 2.5, quota_ov25), ("Over 3.5", 3.5, quota_ov35), ("BTTS", None, quota_btts)]
-    rows, candidates_for_best = [], []
-
-    for name, line, q in markets:
-        p_home = _market_prob(df_home_ctx, name, line)
-        p_away = _market_prob(df_away_ctx, name, line)
-        p_blnd = round((p_home + p_away) / 2, 2) if (p_home > 0 or p_away > 0) else 0.0
-        p_h2h  = _market_prob(df_h2h, name, line)
-
-        ev_home = round(q * (p_home / 100) - 1, 2)
-        ev_away = round(q * (p_away / 100) - 1, 2)
-        ev_blnd = round(q * (p_blnd / 100) - 1, 2)
-        ev_h2h  = round(q * (p_h2h / 100) - 1, 2)
-
-        n_h = len(df_home_ctx); n_a = len(df_away_ctx); n_h2h = len(df_h2h)
-        qual_blnd = _quality_label(n_h + n_a)
-        qual_h2h  = _quality_label(n_h2h)
-
-        rows.append({
-            "Mercato": name, "Quota": q,
-            f"{squadra_casa} @Casa %": p_home, f"EV {squadra_casa}": ev_home,
-            f"{squadra_ospite} @Trasferta %": p_away, f"EV {squadra_ospite}": ev_away,
-            "Blended %": p_blnd, "EV Blended": ev_blnd, "Qualità Blended": qual_blnd,
-            "Head-to-Head %": p_h2h, "EV H2H": ev_h2h, "Qualità H2H": qual_h2h,
-            "Match H": n_h, "Match A": n_a, "Match H2H": n_h2h,
-        })
-
-        candidates_for_best.extend([
-            {"scope": "Blended", "mercato": name, "quota": q, "prob": p_blnd, "ev": ev_blnd, "campione": n_h + n_a, "qualita": qual_blnd},
-            {"scope": "Head-to-Head", "mercato": name, "quota": q, "prob": p_h2h, "ev": ev_h2h, "campione": n_h2h, "qualita": qual_h2h},
-        ])
-
-    df_ev = pd.DataFrame(rows)
-
-    best = None
-    for c in sorted(candidates_for_best, key=lambda x: (x["ev"], 1 if x["scope"] == "Blended" else 0), reverse=True):
-        if c["ev"] > 0:
-            best = c; break
-    return df_ev, best
-
-@st.cache_data(show_spinner=False, ttl=900)
-def _build_ev_table_cached(home_ctx_light: pd.DataFrame, away_ctx_light: pd.DataFrame, h2h_light: pd.DataFrame,
-                           squadra_casa: str, squadra_ospite: str,
-                           quota_ov15: float, quota_ov25: float, quota_ov35: float, quota_btts: float):
-    return _build_ev_table(home_ctx_light.copy(), away_ctx_light.copy(), h2h_light.copy(),
-                           squadra_casa, squadra_ospite, quota_ov15, quota_ov25, quota_ov35, quota_btts)
-
 
 # ================================================================
 # ===============  MACRO KPI PLUS (tabelle pro)  =================
@@ -527,20 +458,20 @@ def _shots(df: pd.DataFrame, side: str):
     # Home / Away totali e SOT
     H_tot  = _series_or_nan(h_tot)
     A_tot  = _series_or_nan(a_tot)
-    H_sotS = _series_or_nan(h_sot)
-    A_sotS = _series_or_nan(a_sot)
+    H_sot  = _series_or_nan(h_sot)
+    A_sot  = _series_or_nan(a_sot)
 
     # Dal punto di vista della squadra (side)
     if side == "Home":
         sf   = H_tot
         sa   = A_tot
-        sotf = H_sotS
-        sota = A_sotS
+        sotf = H_sot
+        sota = A_sot
     else:
         sf   = A_tot
         sa   = H_tot
-        sotf = A_sotS
-        sota = H_sotS
+        sotf = A_sot
+        sota = H_sot
 
     pace_avg = np.nanmean(sf + sa)  # media tiri totali per match
     return {
@@ -668,7 +599,6 @@ def _style_rhythm_block(df: pd.DataFrame, team: str, side: str):
         "over25": float(0 if np.isnan(over25) else over25),
         "n": n,
     }
-
 
 def _calibration_one(df, market: str, k_bins=5):
     col_map = {"Home": "Odd home", "Draw": "Odd Draw", "Away": "Odd Away"}
@@ -806,13 +736,11 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
         st.caption(
             f"**{title}** — campione: {base['N (tot)']} • recenti: {base['N (ultime)']} • affidabilità: {base['Affidabilità']}"
         )
-        # Passo LO STESSO Styler (sty). Niente doppia formattazione sulle Δ:
         st.dataframe(
             sty,
             use_container_width=True,
             height=88,
             column_config={
-
                 "N (ultime)": st.column_config.NumberColumn(format="%.0f"),
                 "N (tot)":    st.column_config.NumberColumn(format="%.0f"),
             },
@@ -925,7 +853,6 @@ def render_macro_kpi_plus(df_ctx: pd.DataFrame, home_team: str, away_team: str):
         _render_calib("Home", 0)
         _render_calib("Draw", 1)
         _render_calib("Away", 2)
-
 
 # ========= ENTRY POINT =========
 def run_pre_match(df: pd.DataFrame, db_selected: str):
@@ -1042,8 +969,10 @@ def run_pre_match(df: pd.DataFrame, db_selected: str):
             else:
                 _set_qparams(home=current_away, away=current_home)
                 st.session_state[_k("swap_trigger")] = True
-                try: st.rerun()
-                except Exception: st.experimental_rerun()
+                try:
+                    st.rerun()
+                except Exception:
+                    st.experimental_rerun()
     with col_sel2:
         squadra_ospite = st.selectbox("Seleziona Squadra Ospite", options=all_teams, index=default_away, key=_k("squadra_ospite"))
 
