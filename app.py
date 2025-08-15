@@ -1,4 +1,4 @@
-# app.py — ProTrader Hub (Supabase filtrato + UI raffinata + preset stagioni + fix session_state + fix colonna 'sezonul' + 📅 Upcoming)
+# app.py — ProTrader Hub (Supabase filtrato + UI raffinata + preset stagioni + fix session_state + fix colonna 'sezonul' + 📅 Upcoming + Auto-match Campionato)
 from __future__ import annotations
 
 import os
@@ -428,7 +428,7 @@ except Exception as e:
     st.warning(f"Normalizzazione minuti-gol non applicata: {e}")
 
 # -------------------------------------------------------
-# 📅 UPCOMING — helpers & UI
+# 📅 UPCOMING — helpers (file + mapping + parsing)
 # -------------------------------------------------------
 def _norm(s: str) -> str:
     if s is None:
@@ -525,6 +525,138 @@ def _to_datetime_safe(datestr, timestr):
     except Exception:
         return None
 
+# -------------------------------------------------------
+# 🔎 AUTO-MATCH CAMPIONATO DA NOMI SQUADRE
+# -------------------------------------------------------
+_NEUTRAL_TOKENS = {
+    "fc","cf","sc","afc","calcio","ac","as","ssd","uc","usd","asd","polisportiva","sporting",
+    "fk","bk","if","sv","sd","cd","de","clube","club","athletic","atletico","spd","ssa",
+    "u","utd","united","city","town","1903","1904","1905","1906","1907","1908","1909","1910",
+    "1911","1912","1913","1914","1915","1916","1917","1918","1919","1920","1930","1940","1950",
+    "u19","u21","ii","iii","b"
+}
+
+def _name_tokens(name: str) -> set[str]:
+    s = _norm(name)
+    raw = re.findall(r"[a-z0-9]+", s)
+    toks = {t for t in raw if len(t) >= 2 and not t.isdigit()}
+    toks = {t for t in toks if t not in _NEUTRAL_TOKENS}
+    return toks
+
+def _token_score(a: str, b: str) -> float:
+    """Token-Set Ratio semplice: |A∩B| / max(|A|,|B|) con fallback substring."""
+    A, B = _name_tokens(a), _name_tokens(b)
+    if not A or not B:
+        na, nb = _norm(a), _norm(b)
+        if not na or not nb:
+            return 0.0
+        if na in nb or nb in na:
+            return 0.6
+        return 0.0
+    inter = len(A & B)
+    denom = max(len(A), len(B))
+    return inter / denom if denom else 0.0
+
+@st.cache_data(show_spinner=False)
+def _build_team_indexes(df_global: pd.DataFrame):
+    """
+    Crea:
+    - teams_by_country: {country -> set(team_names)}
+    """
+    teams_by_country: dict[str,set] = {}
+    if "country" not in df_global.columns:
+        return {}
+
+    home_col = "Home" if "Home" in df_global.columns else None
+    away_col = "Away" if "Away" in df_global.columns else None
+    if not home_col and not away_col:
+        return {}
+
+    for _, row in df_global.iterrows():
+        ctry = str(row["country"]) if not pd.isna(row.get("country")) else None
+        if not ctry:
+            continue
+        teams_by_country.setdefault(ctry, set())
+        for col in (home_col, away_col):
+            if not col:
+                continue
+            nm = row.get(col)
+            if pd.isna(nm):
+                continue
+            nm = str(nm).strip()
+            if not nm:
+                continue
+            teams_by_country[ctry].add(nm)
+
+    return teams_by_country
+
+def _best_match_in_country(name: str, teams_in_country: set[str]) -> tuple[float,str|None]:
+    """Ritorna (score, team_canonico) migliore in un dato campionato."""
+    if not teams_in_country:
+        return 0.0, None
+    nn = _norm(name)
+    # 1) exact normalized
+    for t in teams_in_country:
+        if _norm(t) == nn:
+            return 1.0, t
+    # 2) token-score
+    best_s, best_t = 0.0, None
+    for t in teams_in_country:
+        s = _token_score(name, t)
+        if s > best_s:
+            best_s, best_t = s, t
+            if best_s >= 0.99:
+                break
+    return best_s, best_t
+
+def _auto_detect_country_by_teams(df_global: pd.DataFrame, home: str, away: str, hint: str | None = None):
+    """
+    Individua il 'country' dove compaiono ENTRAMBE le squadre.
+    Logica: massimizza min(score_home, score_away). Soglia accettazione min_score >= 0.78.
+    In caso di pareggio stretto usa l'hint (LeagueRaw) per disambiguare.
+    """
+    teams_by_country = _build_team_indexes(df_global)
+    if not teams_by_country:
+        return None, {"reason": "no-index"}
+
+    candidates = []
+    for ctry, teams in teams_by_country.items():
+        sH, mH = _best_match_in_country(home, teams)
+        sA, mA = _best_match_in_country(away, teams)
+        min_s = min(sH, sA)
+        max_s = max(sH, sA)
+        candidates.append((ctry, min_s, max_s, sH, sA, mH, mA))
+
+    candidates.sort(key=lambda x: (x[1], x[2]), reverse=True)
+    THRESH = 0.78
+    if candidates and candidates[0][1] >= THRESH:
+        ctry, min_s, max_s, sH, sA, mH, mA = candidates[0]
+        details = {
+            "home_score": sH, "home_match": mH,
+            "away_score": sA, "away_match": mA,
+            "min_score": min_s, "max_score": max_s,
+            "method": "token-match",
+            "ordered_top3": candidates[:3],
+        }
+        # tie-break con hint
+        if len(candidates) > 1 and abs(candidates[0][1] - candidates[1][1]) < 0.05 and hint:
+            hn = _norm(hint)
+            for (c2, ms2, _, sH2, sA2, mH2, mA2) in candidates[:3]:
+                if _norm(c2) in hn:
+                    return c2, {
+                        "home_score": sH2, "home_match": mH2,
+                        "away_score": sA2, "away_match": mA2,
+                        "min_score": ms2, "max_score": max(sH2, sA2),
+                        "method": "token+hint",
+                        "ordered_top3": candidates[:3],
+                    }
+        return ctry, details
+
+    return None, {"reason": "low-score", "top": candidates[:3]}
+
+# -------------------------------------------------------
+# 📅 UPCOMING — UI con Auto-match Campionato
+# -------------------------------------------------------
 def render_upcoming(df_global: pd.DataFrame, db_selected_label: str):
     st.title("📅 Upcoming — partite del giorno (quote auto-import)")
 
@@ -632,18 +764,36 @@ def render_upcoming(df_global: pd.DataFrame, db_selected_label: str):
     idx = label_opts.index(sel)
     row = df_up.iloc[idx]
 
-    # Risolvi il campionato del dataset (colonna 'country') a partire da LeagueRaw
-    league_guess = _resolve_dataset_country(df_global, str(row["LeagueRaw"]))
+    # 🔎 AUTO-DETECT del campionato dal DB usando i nomi delle squadre
+    auto_country, det = _auto_detect_country_by_teams(df_global, row["Home"], row["Away"], hint=str(row["LeagueRaw"]))
+    league_guess = auto_country if auto_country else _resolve_dataset_country(df_global, str(row["LeagueRaw"]))
     countries = sorted(df_global["country"].dropna().astype(str).unique()) if "country" in df_global.columns else []
+
+    # UI scelta campionato (default = auto-detect)
     st.caption("Associa il match al campionato presente nel tuo dataset (colonna ‘country’).")
+    default_idx = (countries.index(league_guess) if (countries and league_guess in countries) else 0)
     target_country = st.selectbox(
         "Campionato dataset",
         options=countries or [league_guess],
-        index=(countries.index(league_guess) if league_guess in countries else 0),
+        index=default_idx,
         key="upcoming_dataset_country"
     )
 
-    # Pulsante per aprire l'analisi pre-match con quote importate
+    # Info trasparente sull'auto-match
+    with st.expander("ℹ️ Dettagli auto-match campionato", expanded=False):
+        if auto_country:
+            st.write(f"**Rilevato:** {auto_country}")
+            if isinstance(det, dict):
+                try:
+                    st.write(f"- Home match: `{det.get('home_match')}` (score={det.get('home_score'):.2f})")
+                    st.write(f"- Away match: `{det.get('away_match')}` (score={det.get('away_score'):.2f})")
+                    st.write(f"- Metodo: {det.get('method')}  ·  min_score={det.get('min_score'):.2f}")
+                except Exception:
+                    st.write(det)
+        else:
+            st.write("Nessun match sufficientemente affidabile; fallback su risoluzione per 'LeagueRaw'.")
+
+    # ▶️ Apri Pre-Match con quote importate
     if st.button("🚀 Apri in Pre-Match (quote autocaricate)", type="primary", use_container_width=True, key="open_prematch"):
         # 1) Filtro globale campionato
         st.session_state[GLOBAL_CHAMP_KEY] = str(target_country)
@@ -664,7 +814,6 @@ def render_upcoming(df_global: pd.DataFrame, db_selected_label: str):
         if row.get("BTTS")     is not None: st.session_state["prematch:shared:q_btts"] = float(row["BTTS"])
 
         st.success("Impostazioni caricate: campionato, squadre e quote.")
-        # Apri subito il modulo Pre-Match sul DF attuale
         try:
             run_pre_match(df_global, _db_label_for_modules())
         except Exception as e:
