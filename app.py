@@ -1,4 +1,4 @@
-# app.py — ProTrader Hub (UI sidebar raffinata + Supabase filtrato + selettore rapido stagioni)
+# app.py — ProTrader Hub (Supabase filtrato + UI raffinata + preset stagioni + fix session_state)
 from __future__ import annotations
 
 import os
@@ -63,7 +63,7 @@ _minutes = load_local_module("minutes_mod", "minutes.py")
 unify_goal_minute_columns = getattr(_minutes, "unify_goal_minute_columns")
 
 # -------------------------------------------------------
-# UI — stile sidebar (carino + neutro)
+# UI — stile sidebar
 # -------------------------------------------------------
 def _inject_sidebar_css():
     st.markdown("""
@@ -155,7 +155,7 @@ def _short_origin_label(s: str) -> str:
             s = s.split(sep)[-1]
     return s[:60]
 
-# ---- stagioni helpers (sempre all’indietro nel tempo, switch a Luglio) ----
+# ---- stagioni helpers (sempre all’indietro, switch a Luglio) ----
 def _parse_season_start_year(season_str: str) -> int | None:
     if season_str is None:
         return None
@@ -175,8 +175,7 @@ def _current_season_start_year(tz: str = "Europe/Rome") -> int:
     now = pd.Timestamp.now(tz=tz)
     return int(now.year if now.month >= 7 else now.year - 1)
 
-def _seasons_desc_for(champ: str, seasons_pool: list[str]) -> list[str]:
-    """Ordina stagioni disponibili (stringhe) per start-year decrescente."""
+def _seasons_desc_for(seasons_pool: list[str]) -> list[str]:
     uniq = sorted(set(str(x) for x in seasons_pool))
     uniq.sort(key=lambda s: (_parse_season_start_year(s) or -1, s), reverse=True)
     return uniq
@@ -240,7 +239,6 @@ if origine_dati == "Supabase":
     st.session_state[GLOBAL_SEASONS_KEY] = list(chosen_seasons) if isinstance(chosen_seasons, (list, tuple)) else []
 
     # --- Selettore rapido stagioni (presets) ---
-    # Prova a leggere l'elenco stagioni disponibili per la lega (se utils lo espone); fallback: usa quelle presenti nel DF caricato
     seasons_options = None
     for k in ("campionato_supabase__seasons_all", "campionato_supabase__seasons_choices", "supabase_seasons_choices"):
         if k in st.session_state and st.session_state[k]:
@@ -249,24 +247,38 @@ if origine_dati == "Supabase":
     if seasons_options is None:
         seasons_options = sorted(df["Stagione"].dropna().astype(str).unique()) if "Stagione" in df.columns else []
 
-    seasons_all_desc = _seasons_desc_for(chosen_league or "", seasons_options)
+    seasons_all_desc = _seasons_desc_for(seasons_options)
 
     st.sidebar.markdown("<div class='sb-title'>Intervallo stagioni</div>", unsafe_allow_html=True)
     mode = st.sidebar.radio(
         "",
         ["Stagione corrente", "Ultime 3 stagioni", "Ultime 5 stagioni", "Ultime 10 stagioni", "Manuale"],
-        index=1 if len(seasons_all_desc) >= 3 else 0,  # default "Ultime 3" se possibile
+        index=1 if len(seasons_all_desc) >= 3 else 0,
         key="season_mode_supabase",
     )
 
     if mode != "Manuale":
         sel_seasons = _select_seasons_by_mode(seasons_all_desc, mode)
-        # Scrivi sia nei GLOBAL sia nei selettori Supabase (così in un rerun si ricarica già filtrato lato server)
-        st.session_state[GLOBAL_SEASONS_KEY] = sel_seasons
-        st.session_state["campionato_supabase__seasons"] = sel_seasons
-        # Filtra localmente il DF corrente (coerente se il server ha già letto un sottoinsieme più ampio)
+
+        # Aggiorna filtri GLOBALI (list)
+        st.session_state[GLOBAL_SEASONS_KEY] = list(sel_seasons)
+
+        # Prova ad aggiornare anche il widget Supabase rispettando il TIPO corrente
+        wkey = "campionato_supabase__seasons"
+        if wkey in st.session_state:
+            cur_val = st.session_state[wkey]
+            try:
+                if isinstance(cur_val, tuple):
+                    st.session_state[wkey] = tuple(sel_seasons)
+                elif isinstance(cur_val, list):
+                    st.session_state[wkey] = list(sel_seasons)
+            except Exception:
+                pass
+
+        # Filtra localmente il DF (coerente col preset); la prossima lettura server-side userà il widget
         if "Stagione" in df.columns and sel_seasons:
-            df = df[df["Stagione"].astype(str).isin(sel_seasons)]
+            df = df[df["Stagione"].astype(str).isin([str(s) for s in sel_seasons])]
+
         st.sidebar.caption(f"🎯 Preset applicato → {', '.join(sel_seasons) if sel_seasons else 'nessuna stagione trovata'}")
     else:
         st.sidebar.caption("✍️ Manuale: usa il multiselect ‘Seleziona stagioni’ sopra.")
@@ -278,11 +290,12 @@ else:
     # Preset stagioni anche per upload (filtra localmente)
     champ_list = sorted(df["country"].dropna().astype(str).unique()) if "country" in df.columns else []
     if champ_list:
-        # mantieni ultima scelta se presente
-        cur_champ = st.session_state.get(GLOBAL_CHAMP_KEY, champ_list[0])
-        st.session_state[GLOBAL_CHAMP_KEY] = cur_champ
-        df_tmp = df[df["country"].astype(str) == str(cur_champ)]
-        seasons_all_desc = _seasons_desc_for(cur_champ, list(df_tmp["Stagione"].dropna().astype(str).unique())) if "Stagione" in df_tmp.columns else []
+        st.sidebar.markdown("<div class='sb-title'>Campionato (upload)</div>", unsafe_allow_html=True)
+        sel_champ = st.sidebar.selectbox("", champ_list, index=0)
+        st.session_state[GLOBAL_CHAMP_KEY] = sel_champ
+        df_ch = df[df["country"].astype(str) == str(sel_champ)]
+        seasons_all_desc = _seasons_desc_for(list(df_ch["Stagione"].dropna().astype(str).unique())) if "Stagione" in df_ch.columns else []
+
         st.sidebar.markdown("<div class='sb-title'>Intervallo stagioni</div>", unsafe_allow_html=True)
         mode = st.sidebar.radio(
             "",
@@ -292,12 +305,15 @@ else:
         )
         if mode != "Manuale":
             sel_seasons = _select_seasons_by_mode(seasons_all_desc, mode)
-            st.session_state[GLOBAL_SEASONS_KEY] = sel_seasons
+            st.session_state[GLOBAL_SEASONS_KEY] = list(sel_seasons)
             if "Stagione" in df.columns and sel_seasons:
-                df = df[df["Stagione"].astype(str).isin(sel_seasons)]
+                df = df[(df["country"].astype(str) == str(sel_champ)) & (df["Stagione"].astype(str).isin([str(s) for s in sel_seasons]))]
+            else:
+                df = df[df["country"].astype(str) == str(sel_champ)]
             st.sidebar.caption(f"🎯 Preset applicato → {', '.join(sel_seasons) if sel_seasons else 'nessuna stagione trovata'}")
         else:
-            st.sidebar.caption("✍️ Manuale: usa i filtri stagioni del modulo.")
+            df = df[df["country"].astype(str) == str(sel_champ)]
+            st.sidebar.caption("✍️ Manuale: gestisci i filtri stagioni nel modulo.")
 
 # -------------------------------------------------------
 # MAPPING COLONNE COMPLETO & LABEL di base
@@ -388,7 +404,7 @@ if "Label" not in df.columns:
     else:
         df["Label"] = "Others"
 
-# Minuti-gol normalizzati (standardizza / ricostruisce da gh*/ga* se mancano)
+# Minuti-gol normalizzati
 try:
     df = unify_goal_minute_columns(df)
 except Exception as e:
