@@ -187,7 +187,7 @@ def _render_setup_and_body(
     df["Home"] = _ensure_str_with_unknown(df["Home"], "")
     df["Away"] = _ensure_str_with_unknown(df["Away"], "")
 
-    # --- Filtro stagioni (solo manuale per questa sezione)
+    # --- Filtro stagioni (evita duplicati quando EMBEDDED)
     if "Stagione" not in df.columns:
         st.error("Colonna 'Stagione' mancante.")
         st.stop()
@@ -195,18 +195,23 @@ def _render_setup_and_body(
     seasons_desc = _seasons_desc(df["Stagione"].dropna().unique().tolist())
     latest = seasons_desc[0] if seasons_desc else None
 
-    with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
-        seasons_selected = st.multiselect(
-            "Scegli le stagioni da includere (se vuoto = tutte)",
-            options=seasons_desc,
-            default=[latest] if latest else [],
-            key="teams:seasons_manual",
-        )
-        if seasons_selected:
-            st.caption(f"Stagioni attive (sezione Squadre): **{', '.join(seasons_selected)}**")
-            df = df[df["Stagione"].astype("string").isin(seasons_selected)].copy()
-        else:
-            st.caption("Stagioni attive (sezione Squadre): **Tutte**")
+    if not is_embedded:
+        # Pagina autonoma: manteniamo il filtro locale
+        with st.expander("⚙️ Filtro stagioni (solo per questa sezione)", expanded=True):
+            seasons_selected = st.multiselect(
+                "Scegli le stagioni da includere (se vuoto = tutte)",
+                options=seasons_desc,
+                default=[latest] if latest else [],
+                key="teams:seasons_manual",
+            )
+            if seasons_selected:
+                st.caption(f"Stagioni attive (sezione Squadre): **{', '.join(seasons_selected)}**")
+                df = df[df["Stagione"].astype("string").isin(seasons_selected)].copy()
+            else:
+                st.caption("Stagioni attive (sezione Squadre): **Tutte**")
+    else:
+        # Embedded nel tab di pre_match: il DF è già pre-filtrato dal tab stesso
+        st.caption("Stagioni: ereditate dal contesto pre-match (nessun filtro locale mostrato).")
 
     # --- Selettori squadre (se pagina autonoma)
     if not is_embedded:
