@@ -1,8 +1,5 @@
-# upcoming.py — "📅 Upcoming" con:
-# - bypass filtro campionato
-# - normalizzazione colonne (txtechipa1/2→Home/Away, sezonul→Stagione, …)
-# - auto-match LeagueRaw→prefisso+divisione (FRA1, BEL2…)
-# - pannello debug
+# upcoming.py — Upcoming con bypass campionato, normalizzazioni complete,
+# colonne FT garantite, auto-match LeagueRaw→CODICE(+divisione) e debug.
 from __future__ import annotations
 
 import os, sys, re, importlib.util, unicodedata
@@ -14,7 +11,7 @@ GLOBAL_CHAMP_KEY   = "global_country"
 GLOBAL_SEASONS_KEY = "global_seasons"
 
 # ------------------------------
-# Utils (facoltative, se presenti nel progetto)
+# Carica utilità di progetto (se presenti)
 # ------------------------------
 def _load_utils():
     try:
@@ -28,12 +25,29 @@ def _load_utils():
             return (
                 getattr(mod, "get_global_source_df", None),
                 getattr(mod, "_read_parquet_filtered", None),
+                getattr(mod, "label_match", None),
             )
     except Exception:
         pass
-    return None, None
+    return None, None, None
 
-_get_global_source_df, _read_parquet_filtered = _load_utils()
+_get_global_source_df, _read_parquet_filtered, _label_match = _load_utils()
+
+# minutes.py (facoltativo)
+def _load_minutes():
+    try:
+        base_dir = os.path.dirname(__file__)
+        path = os.path.join(base_dir, "minutes.py")
+        spec = importlib.util.spec_from_file_location("up_minutes", path)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["up_minutes"] = mod
+            spec.loader.exec_module(mod)  # type: ignore
+            return getattr(mod, "unify_goal_minute_columns", None)
+    except Exception:
+        pass
+    return None
+_unify_goal_minutes = _load_minutes()
 
 # ------------------------------
 # Normalizzazioni base
@@ -53,7 +67,7 @@ def _sanitize_columns(df: pd.DataFrame) -> pd.DataFrame:
                   .str.replace(r"\s+", " ", regex=True))
     return df
 
-# ---- mappa alias → colonne target del nostro progetto
+# alias → target
 ALIASES = {
     "Home":      ["Home","txtechipa1","echipa1","gazde","casa","team1","home_team","squadra_casa","mandante"],
     "Away":      ["Away","txtechipa2","echipa2","ospiti","trasferta","team2","away_team","squadra_ospite"],
@@ -62,6 +76,12 @@ ALIASES = {
     "Odd home":  ["Odd home","cotaa","homeodds","oddhome","1","odds1"],
     "Odd Draw":  ["Odd Draw","cotae","odddraw","x","oddsx","draw"],
     "Odd Away":  ["Odd Away","cotad","awayodds","oddaway","2","odds2"],
+    # FINAL SCORE (fondamentali per Pre-Match, li garantiamo)
+    "Home Goal FT": ["Home Goal FT","scor1","golhome","goalhome","goals_home"],
+    "Away Goal FT": ["Away Goal FT","scor2","golaway","goalaway","goals_away"],
+    # opzionale: 1T
+    "Home Goal 1T": ["Home Goal 1T","scorp1"],
+    "Away Goal 1T": ["Away Goal 1T","scorp2"],
 }
 
 def _build_rename_map(df: pd.DataFrame) -> dict:
@@ -82,7 +102,45 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     ren = _build_rename_map(df)
     if ren:
         df = df.rename(columns=ren)
+    # garantisci colonne FT (vuote se non presenti)
+    for col in ("Home Goal FT","Away Goal FT"):
+        if col not in df.columns:
+            df[col] = pd.NA
+    # metti in maiuscolo i codici stile FRA1/ENG2
+    if "country" in df.columns:
+        def _up_if_code(x):
+            s = str(x)
+            return s.upper() if re.match(r"^[A-Za-z]{3}\d+$", s) else s
+        try:
+            df["country"] = df["country"].map(_up_if_code)
+        except Exception:
+            pass
+    # Label se manca
+    if "Label" not in df.columns:
+        if callable(_label_match) and {"Odd home","Odd Away"}.issubset(df.columns):
+            try:
+                df["Label"] = df.apply(_label_match, axis=1)
+            except Exception:
+                df["Label"] = df.apply(_label_fallback, axis=1)
+        else:
+            df["Label"] = df.apply(_label_fallback, axis=1)
+    # Minuti (se disponibile)
+    if callable(_unify_goal_minutes):
+        try:
+            df = _unify_goal_minutes(df)
+        except Exception:
+            pass
     return df
+
+def _label_fallback(row: pd.Series) -> str:
+    try:
+        oh = float(row.get("Odd home"))
+        oa = float(row.get("Odd Away"))
+        if not pd.isna(oh) and not pd.isna(oa):
+            return "HomeFav" if oh < oa else "AwayFav"
+    except Exception:
+        pass
+    return "Others"
 
 # ------------------------------
 # Lettura file giornata
@@ -147,8 +205,10 @@ def _to_datetime_safe(datestr, timestr):
 # ------------------------------
 def _get_df_all_leagues(df_current: pd.DataFrame) -> pd.DataFrame:
     """
-    Ritorna il DF sorgente SENZA filtro campionato (mantiene eventuale filtro stagioni) e
-    **normalizza le colonne** in Home/Away/country/Stagione/Quote.
+    Ritorna il DF sorgente SENZA filtro campionato e **normalizzato**:
+    - Home/Away/country/Stagione/Quote
+    - garantisce 'Home Goal FT'/'Away Goal FT'
+    - calcola 'Label' se manca
     """
     df_src = None
 
@@ -168,36 +228,10 @@ def _get_df_all_leagues(df_current: pd.DataFrame) -> pd.DataFrame:
         except Exception as e:
             st.warning(f"Bypass indisponibile: {e}")
 
-    # Fallback: prova a ricaricare ultimo upload originale
-    if df_src is None:
-        up = st.session_state.get("file_uploader_upload")
-        if up is not None:
-            try:
-                name = (up.name or "").lower()
-                if name.endswith(".csv"):     df_src = pd.read_csv(up)
-                elif name.endswith(".parquet"): df_src = pd.read_parquet(up)
-                else:
-                    try:    df_src = pd.read_excel(up)
-                    except: df_src = pd.read_excel(up, engine="xlrd")
-            except Exception:
-                pass
-
     if df_src is None:
         df_src = df_current
 
-    # >>> NORMALIZZA <<<
     df_src = _normalize_df(df_src)
-
-    # (opzionale) porta i codici 'country' in maiuscolo se sembrano codici (FRA1, ENG2…)
-    if "country" in df_src.columns:
-        def _up_if_code(x):
-            s = str(x)
-            return s.upper() if re.match(r"^[A-Za-z]{3}\d+$", s) else s
-        try:
-            df_src["country"] = df_src["country"].map(_up_if_code)
-        except Exception:
-            pass
-
     return df_src
 
 # ------------------------------
@@ -223,8 +257,9 @@ COMPETITION_HINTS = {
     "superlig": "turkey", "tff": "turkey",
     "jupiler": "belgium", "proleague": "belgium", "challenger": "belgium", "proximus": "belgium",
     "ekstraklasa": "poland",
-    "cup": "", "cupafrance": "france",
+    "cupafrance": "france",
 }
+
 ALIASES_COUNTRY_WORDS = {
     "francia":"france","franca":"france",
     "alemania":"germany","deutschland":"germany","allemagne":"germany",
@@ -243,7 +278,7 @@ def _country_key_from_leagueraw(leagueraw: str) -> str | None:
     for ali, key in ALIASES_COUNTRY_WORDS.items():
         if ali in s: return key
     for kw, key in COMPETITION_HINTS.items():
-        if kw and kw in s and key: return key
+        if kw in s and key: return key
     return None
 
 # ------------------------------
@@ -365,7 +400,7 @@ def _auto_detect_country_by_teams(df_global: pd.DataFrame, home: str, away: str,
         return code, {
             "home_score": sH, "home_match": mH,
             "away_score": sA, "away_match": mA,
-            "min_score": min_s, "max_score": max(sH, sA),
+            "min_score": min_s, "max_score": max_s,
             "method": "token-match",
             "ordered_top5": ranked[:5],
         }
@@ -402,10 +437,10 @@ def render_upcoming(df_current: pd.DataFrame, db_selected_label: str, run_pre_ma
 
     # DF “all leagues” per il match (bypass campionato) **e normalizzato**
     df_all = _get_df_all_leagues(df_current)
-    # avviso se mancano colonne chiave
-    for must in ("Home","Away","country"):
+
+    for must in ("Home","Away","country","Home Goal FT","Away Goal FT","Label"):
         if must not in df_all.columns:
-            st.error(f"Dataset sorgente privo della colonna obbligatoria: **{must}**. Controlla l’origine dati.")
+            st.error(f"Dataset sorgente privo della colonna obbligatoria: **{must}**.")
             return
 
     up = st.file_uploader("Carica il file quotidiano (Excel/CSV)", type=["xls","xlsx","csv","parquet"], key="upcoming_upl")
@@ -466,7 +501,7 @@ def render_upcoming(df_current: pd.DataFrame, db_selected_label: str, run_pre_ma
         })
 
     if not records:
-        st.warning("Nessun match valido trovato nel file."); return
+        st.warning("Nessun match valido nel file."); return
 
     df_up = pd.DataFrame(records).sort_values("Datetime", na_position="last")
     st.subheader("Lista partite")
@@ -487,7 +522,7 @@ def render_upcoming(df_current: pd.DataFrame, db_selected_label: str, run_pre_ma
     idx = labels.index(sel)
     row = df_up.iloc[idx]
 
-    # --- Auto-detect codice campionato ---
+    # ---- Auto-detect campionato (prefisso + token squadre) ----
     auto_code, det1 = _auto_detect_code_by_leagueraw_and_teams(df_all, str(row["LeagueRaw"]), row["Home"], row["Away"])
     auto_code2, det2 = (None, None)
     if not auto_code:
@@ -500,21 +535,18 @@ def render_upcoming(df_current: pd.DataFrame, db_selected_label: str, run_pre_ma
     if league_guess is None and fallback_candidates:
         league_guess = fallback_candidates[0]
 
-    st.caption("Associa il match al campionato presente nel tuo dataset (es. SPA1/ENG2...).")
+    st.caption("Associa il match al campionato presente nel tuo dataset (es. FRA2/SPA1/ENG2 ...).")
     default_idx = (countries.index(league_guess) if (countries and league_guess in countries)
                    else (countries.index(fallback_candidates[0]) if (countries and fallback_candidates) else 0))
     target_country = st.selectbox("Campionato dataset", options=countries or [league_guess or ""], index=default_idx)
 
     with st.expander("ℹ️ Dettagli auto-match campionato", expanded=False):
         st.write(f"LeagueRaw: `{row['LeagueRaw']}`  ·  Prefissi attesi: {prefixes or '—'}")
-        if auto_code:
-            st.success(f"Rilevato (LeagueRaw→prefisso): **{auto_code}**"); st.write(det1)
-        elif auto_code2:
-            st.info(f"Rilevato (fallback token-match globale): **{auto_code2}**"); st.write(det2)
-        else:
-            st.warning("Nessun match affidabile: scegli manualmente. (Sopra vedi prefissi e candidati)")
+        if auto_code:   st.success(f"Rilevato (LeagueRaw→prefisso): **{auto_code}**"); st.write(det1)
+        elif auto_code2:st.info   (f"Rilevato (token-match globale): **{auto_code2}**"); st.write(det2)
+        else:           st.warning("Nessun match affidabile: scegli manualmente (sopra vedi prefissi e candidati).")
 
-    # Avvia Pre-Match con dataset NORMALIZZATO (così non manca 'Home')
+    # ---- Apri Pre-Match con DF normalizzato (colonne FT garantite) ----
     if st.button("🚀 Apri in Pre-Match (quote autocaricate)", type="primary", use_container_width=True, key="open_prematch"):
         st.session_state[GLOBAL_CHAMP_KEY] = str(target_country)
         st.session_state["prematch:squadra_casa"]   = str(row["Home"])
