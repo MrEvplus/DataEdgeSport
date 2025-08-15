@@ -1,8 +1,9 @@
-# app.py — ProTrader Hub (UI sidebar raffinata + Supabase filtrato: scegli LEGA+STAGIONI prima di leggere il parquet)
+# app.py — ProTrader Hub (UI sidebar raffinata + Supabase filtrato + selettore rapido stagioni)
 from __future__ import annotations
 
 import os
 import sys
+import re
 import importlib.util
 import streamlit as st
 import pandas as pd
@@ -62,15 +63,12 @@ _minutes = load_local_module("minutes_mod", "minutes.py")
 unify_goal_minute_columns = getattr(_minutes, "unify_goal_minute_columns")
 
 # -------------------------------------------------------
-# UI — stile sidebar (carino + neutro, non invasivo)
+# UI — stile sidebar (carino + neutro)
 # -------------------------------------------------------
 def _inject_sidebar_css():
     st.markdown("""
     <style>
-    /* Layout base sidebar */
-    [data-testid="stSidebar"] > div {
-      padding-top: .6rem;
-    }
+    [data-testid="stSidebar"] > div { padding-top: .6rem; }
     .sb-header {
       background: linear-gradient(135deg, #0ea5e9 0%, #22c55e 100%);
       color: #fff; padding: .9rem .95rem; border-radius: 14px;
@@ -79,43 +77,29 @@ def _inject_sidebar_css():
     }
     .sb-header b { font-weight: 800; }
     .sb-sub { opacity:.85; font-size: .9rem; margin-top: .15rem; }
-
-    .sb-title {
-      margin: .6rem 0 .25rem 0; font-weight: 700; font-size: .92rem; color: #0f172a;
-    }
+    .sb-title { margin: .6rem 0 .25rem 0; font-weight: 700; font-size: .92rem; color: #0f172a; }
     .sb-card {
       background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 14px;
       padding: .6rem .65rem .7rem; margin-bottom: .6rem;
     }
-
-    /* Selectbox & Multiselect (Baseweb) */
     [data-testid="stSidebar"] div[data-baseweb="select"] > div {
       background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px;
       box-shadow: 0 3px 10px rgba(2,6,23,.04);
       min-height: 44px;
     }
-    [data-testid="stSidebar"] div[data-baseweb="select"] svg {
-      opacity: .7;
-    }
-    /* Tag (chip) stagioni */
     [data-testid="stSidebar"] div[data-baseweb="tag"] {
       border-radius: 999px !important;
       background: #fee2e2 !important; color: #7f1d1d !important; border-color: #fecaca !important;
       font-weight: 600;
     }
-
-    /* Radio as cards */
     [data-testid="stSidebar"] [role="radiogroup"] label {
       border: 1px solid #e5e7eb; border-radius: 12px; padding: .35rem .55rem;
       margin-bottom: .35rem; transition: all .12s ease-in-out;
-      display:flex; align-items:center; gap:.4rem;
-      background: #fff;
+      display:flex; align-items:center; gap:.4rem; background: #fff;
     }
     [data-testid="stSidebar"] [role="radiogroup"] label:hover {
       border-color: #cbd5e1; box-shadow: 0 4px 14px rgba(2,6,23,.06);
     }
-
-    /* Tiny badge (righe caricate) */
     .tiny-badge {
       display:inline-block; padding:.1rem .5rem; border-radius: 999px;
       background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; font-size:.78rem;
@@ -135,18 +119,6 @@ def _sidebar_header():
 # -------------------------------------------------------
 # SUPPORTO
 # -------------------------------------------------------
-def _short_origin_label(s: str) -> str:
-    if not s:
-        return ""
-    sl = s.lower()
-    if sl.startswith("supabase"):
-        return "Supabase"
-    for sep in ("/", "\\"):
-        if sep in s:
-            s = s.split(sep)[-1]
-    return s[:60]
-
-# —— FILTRI GLOBALI condivisi tra moduli ——
 GLOBAL_CHAMP_KEY   = "global_country"
 GLOBAL_SEASONS_KEY = "global_seasons"
 
@@ -172,6 +144,75 @@ def _db_label_for_modules() -> str:
     champ = st.session_state.get(GLOBAL_CHAMP_KEY)
     return str(champ) if champ else "Dataset"
 
+def _short_origin_label(s: str) -> str:
+    if not s:
+        return ""
+    sl = s.lower()
+    if sl.startswith("supabase"):
+        return "Supabase"
+    for sep in ("/", "\\"):
+        if sep in s:
+            s = s.split(sep)[-1]
+    return s[:60]
+
+# ---- stagioni helpers (sempre all’indietro nel tempo, switch a Luglio) ----
+def _parse_season_start_year(season_str: str) -> int | None:
+    if season_str is None:
+        return None
+    s = str(season_str)
+    nums = re.findall(r"\d{2,4}", s)
+    if not nums:
+        return None
+    first = nums[0]
+    if len(first) == 4:
+        return int(first)
+    if len(first) == 2:
+        yy = int(first)
+        return 2000 + yy if yy <= 50 else 1900 + yy
+    return None
+
+def _current_season_start_year(tz: str = "Europe/Rome") -> int:
+    now = pd.Timestamp.now(tz=tz)
+    return int(now.year if now.month >= 7 else now.year - 1)
+
+def _seasons_desc_for(champ: str, seasons_pool: list[str]) -> list[str]:
+    """Ordina stagioni disponibili (stringhe) per start-year decrescente."""
+    uniq = sorted(set(str(x) for x in seasons_pool))
+    uniq.sort(key=lambda s: (_parse_season_start_year(s) or -1, s), reverse=True)
+    return uniq
+
+def _map_startyear_to_seasons(seasons_list: list[str]) -> dict[int, list[str]]:
+    m: dict[int, list[str]] = {}
+    for s in seasons_list:
+        y = _parse_season_start_year(s)
+        if y is None:
+            continue
+        m.setdefault(y, []).append(s)
+    for y in m:
+        m[y].sort(key=lambda s: (_parse_season_start_year(s) or -1, s), reverse=True)
+    return m
+
+def _select_seasons_by_mode(seasons_all_desc: list[str], mode: str) -> list[str]:
+    cur = _current_season_start_year()
+    m = _map_startyear_to_seasons(seasons_all_desc)
+
+    def take_last(n: int) -> list[str]:
+        years = [cur - i for i in range(n)]
+        out: list[str] = []
+        for y in years:
+            out.extend(m.get(y, []))
+        return out
+
+    if mode == "Stagione corrente":
+        return m.get(cur, [])
+    if mode == "Ultime 3 stagioni":
+        return take_last(3)
+    if mode == "Ultime 5 stagioni":
+        return take_last(5)
+    if mode == "Ultime 10 stagioni":
+        return take_last(10)
+    return []  # Manuale
+
 # -------------------------------------------------------
 # CONFIG PAGINA
 # -------------------------------------------------------
@@ -180,26 +221,83 @@ _inject_sidebar_css()
 _sidebar_header()
 
 # -------------------------------------------------------
-# ORIGINE DATI (con UI stile "card")
+# ORIGINE DATI + caricamento filtrato Supabase
 # -------------------------------------------------------
 st.sidebar.markdown("<div class='sb-title'>Origine dati</div>", unsafe_allow_html=True)
 origine_dati = st.sidebar.radio("", ["Supabase", "Upload Manuale"], key="origine_dati")
 
 if origine_dati == "Supabase":
     st.sidebar.markdown("<div class='sb-card'>📦 <b>Origine:</b> Supabase Storage (Parquet via DuckDB)</div>", unsafe_allow_html=True)
-    # UI integrata nei selettori di utils (lega + stagioni) e lettura FILTRATA server-side (cache 15')
+
+    # UI integrata (lega + stagioni) e LETTURA FILTRATA server-side (cache 15')
     df, db_selected = load_data_from_supabase(selectbox_key="campionato_supabase", ui_mode="full", show_url_input=True)
 
-    # Allinea i filtri GLOBALI con la scelta fatta nei selettori Supabase (stessi key di utils)
+    # Sincronizza filtri GLOBALI con selezione Supabase
     chosen_league  = st.session_state.get("campionato_supabase")
     chosen_seasons = st.session_state.get("campionato_supabase__seasons", [])
     if chosen_league:
         st.session_state[GLOBAL_CHAMP_KEY] = str(chosen_league)
     st.session_state[GLOBAL_SEASONS_KEY] = list(chosen_seasons) if isinstance(chosen_seasons, (list, tuple)) else []
 
+    # --- Selettore rapido stagioni (presets) ---
+    # Prova a leggere l'elenco stagioni disponibili per la lega (se utils lo espone); fallback: usa quelle presenti nel DF caricato
+    seasons_options = None
+    for k in ("campionato_supabase__seasons_all", "campionato_supabase__seasons_choices", "supabase_seasons_choices"):
+        if k in st.session_state and st.session_state[k]:
+            seasons_options = [str(x) for x in st.session_state[k]]
+            break
+    if seasons_options is None:
+        seasons_options = sorted(df["Stagione"].dropna().astype(str).unique()) if "Stagione" in df.columns else []
+
+    seasons_all_desc = _seasons_desc_for(chosen_league or "", seasons_options)
+
+    st.sidebar.markdown("<div class='sb-title'>Intervallo stagioni</div>", unsafe_allow_html=True)
+    mode = st.sidebar.radio(
+        "",
+        ["Stagione corrente", "Ultime 3 stagioni", "Ultime 5 stagioni", "Ultime 10 stagioni", "Manuale"],
+        index=1 if len(seasons_all_desc) >= 3 else 0,  # default "Ultime 3" se possibile
+        key="season_mode_supabase",
+    )
+
+    if mode != "Manuale":
+        sel_seasons = _select_seasons_by_mode(seasons_all_desc, mode)
+        # Scrivi sia nei GLOBAL sia nei selettori Supabase (così in un rerun si ricarica già filtrato lato server)
+        st.session_state[GLOBAL_SEASONS_KEY] = sel_seasons
+        st.session_state["campionato_supabase__seasons"] = sel_seasons
+        # Filtra localmente il DF corrente (coerente se il server ha già letto un sottoinsieme più ampio)
+        if "Stagione" in df.columns and sel_seasons:
+            df = df[df["Stagione"].astype(str).isin(sel_seasons)]
+        st.sidebar.caption(f"🎯 Preset applicato → {', '.join(sel_seasons) if sel_seasons else 'nessuna stagione trovata'}")
+    else:
+        st.sidebar.caption("✍️ Manuale: usa il multiselect ‘Seleziona stagioni’ sopra.")
+
 else:
     df, db_selected = load_data_from_file(ui_mode="minimal")
     st.sidebar.markdown("<div class='sb-card'>📄 Upload manuale del parquet locale</div>", unsafe_allow_html=True)
+
+    # Preset stagioni anche per upload (filtra localmente)
+    champ_list = sorted(df["country"].dropna().astype(str).unique()) if "country" in df.columns else []
+    if champ_list:
+        # mantieni ultima scelta se presente
+        cur_champ = st.session_state.get(GLOBAL_CHAMP_KEY, champ_list[0])
+        st.session_state[GLOBAL_CHAMP_KEY] = cur_champ
+        df_tmp = df[df["country"].astype(str) == str(cur_champ)]
+        seasons_all_desc = _seasons_desc_for(cur_champ, list(df_tmp["Stagione"].dropna().astype(str).unique())) if "Stagione" in df_tmp.columns else []
+        st.sidebar.markdown("<div class='sb-title'>Intervallo stagioni</div>", unsafe_allow_html=True)
+        mode = st.sidebar.radio(
+            "",
+            ["Stagione corrente", "Ultime 3 stagioni", "Ultime 5 stagioni", "Ultime 10 stagioni", "Manuale"],
+            index=1 if len(seasons_all_desc) >= 3 else 0,
+            key="season_mode_upload",
+        )
+        if mode != "Manuale":
+            sel_seasons = _select_seasons_by_mode(seasons_all_desc, mode)
+            st.session_state[GLOBAL_SEASONS_KEY] = sel_seasons
+            if "Stagione" in df.columns and sel_seasons:
+                df = df[df["Stagione"].astype(str).isin(sel_seasons)]
+            st.sidebar.caption(f"🎯 Preset applicato → {', '.join(sel_seasons) if sel_seasons else 'nessuna stagione trovata'}")
+        else:
+            st.sidebar.caption("✍️ Manuale: usa i filtri stagioni del modulo.")
 
 # -------------------------------------------------------
 # MAPPING COLONNE COMPLETO & LABEL di base
@@ -249,7 +347,6 @@ col_map = {
     "sutht1": "Tiri in Porta Home 1T",
     "sutht2": "Tiri in Porta Home 2T",
     "sutat":  "Tiri in Porta Away FT",
-    "satat1": "Tiri in Porta Away 1T",  # typo protection (se presente in alcune fonti)
     "sutat1": "Tiri in Porta Away 1T",
     "sutat2": "Tiri in Porta Away 2T",
     "mgolh": "Minuti Goal Home",
@@ -302,13 +399,11 @@ except Exception as e:
 # -------------------------------------------------------
 st.title("📊 Pre-Match — Hub")
 selection_badges()
-
-# Origine & righe
 db_short = _short_origin_label(str(db_selected))
 st.caption(f"Origine dati: **{db_short}** · <span class='tiny-badge'>Righe caricate: {len(df):,}</span>", unsafe_allow_html=True)
 
 # -------------------------------------------------------
-# MENU (solo Hub) — stile a card grazie al CSS radio
+# MENU (solo Hub)
 # -------------------------------------------------------
 st.sidebar.markdown("<div class='sb-title'>Naviga</div>", unsafe_allow_html=True)
 menu_option = st.sidebar.radio("", ["Pre-Match (Hub)"], key="menu_principale")
