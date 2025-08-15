@@ -22,32 +22,60 @@ except Exception:
 # =====================================================
 # Odds helpers + Labeling coerente
 # =====================================================
-def _get_odd(row: pd.Series, *candidates: str) -> float:
-    """Ritorna il primo campo presente tra *candidates* convertito in float.
-    Gestisce virgola come separatore decimale.
+def _get_odd(row, *candidates):
+    """Ritorna la prima quota trovata tra gli alias passati.
+    Accetta Series/dict; converte '2,05' -> 2.05.
     """
-    for c in candidates:
-        if c in row:
-            try:
-                return float(str(row[c]).replace(",", "."))
-            except Exception:
-                pass
+    try:
+        keys = list(candidates)
+    except Exception:
+        keys = candidates
+    # Consenti accesso case-insensitive
+    try:
+        available = {str(k).lower(): k for k in row.keys()}  # type: ignore[attr-defined]
+    except Exception:
+        available = None
+
+    for c in keys:
+        if available is not None:
+            k = available.get(str(c).lower())
+            if k is None:
+                continue
+            val = row[k]
+        else:
+            # fallback generico
+            if c not in row:
+                continue
+            val = row[c]
+        try:
+            return float(str(val).replace(",", "."))
+        except Exception:
+            continue
     return float("nan")
 
 
 def label_match(row: pd.Series) -> str:
     """Classifica la partita in macro-bucket in base alle quote 1x2 pre-match.
 
-    Label usati nel progetto (compatibili con versioni precedenti):
+    Label compatibili:
       - SuperCompetitive H<=3 A<=3
       - H_StrongFav <1.5 / A_StrongFav <1.5
       - H_MediumFav 1.5-2 / A_MediumFav 1.5-2
       - H_SmallFav 2-3   / A_SmallFav 2-3
       - Others
     """
+    # 🔎 Alias molto ampi per intercettare colonne diverse nei vari dataset
+    HOME_ALIASES = (
+        "Odd home", "Odd Home", "cotaa", "oddhome", "homeodds",
+        "odds1", "cota1", "home", "1"
+    )
+    AWAY_ALIASES = (
+        "Odd Away", "Odd away", "cotad", "oddaway", "awayodds",
+        "odds2", "cota2", "away", "2"
+    )
     try:
-        h = float(_get_odd(row, "Odd home", "Odd Home", "cotaa"))
-        a = float(_get_odd(row, "Odd Away", "Odd away", "cotad"))
+        h = float(_get_odd(row, *HOME_ALIASES))
+        a = float(_get_odd(row, *AWAY_ALIASES))
     except Exception:
         return "Others"
 
@@ -77,7 +105,6 @@ def label_match(row: pd.Series) -> str:
         return "A_SmallFav 2-3"
 
     return "Others"
-
 
 # =====================================================
 # Estrazione/normalizzazione minuti (utility leggera)
